@@ -5,7 +5,7 @@
 The row that says `深度求索中，用时 3秒 ···` next to a whale tail is the one thing you look at
 more than the answer. This replaces its icon and its copy, and keeps the timer.
 
-![The row, reskinned](assets/compiled-128/蓝色大肥鱼/f001.gif)
+![The row, reskinned](assets/cover.gif)
 
 ---
 

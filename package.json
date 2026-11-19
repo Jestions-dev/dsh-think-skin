@@ -1,9 +1,18 @@
 {
   "name": "dsh-think-skin",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Reskin the DSH thinking row: your own image, your own words, double random.",
   "type": "module",
   "license": "MIT",
+  "author": "Jestions",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Jestions-dev/dsh-think-skin.git"
+  },
+  "homepage": "https://github.com/Jestions-dev/dsh-think-skin",
+  "bugs": {
+    "url": "https://github.com/Jestions-dev/dsh-think-skin/issues"
+  },
   "keywords": [
     "dsh-plugin",
     "deepseek-harness",
@@ -17,7 +26,12 @@
   "files": [
     "index.js",
     "client.js",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "tools/import-pack.py",
+    "assets/cover.gif",
+    "assets/compiled-128",
+    "assets/ClaudeCode/verbs.json",
+    "assets/ClaudeCode/placeholder.png"
   ],
   "dsh": {
     "bundle": {
