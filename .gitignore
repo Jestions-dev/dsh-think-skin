@@ -1,0 +1,20 @@
+# Reference clones and sources. Never publish these: they are other people's
+# code, and one of them (huanlinoto/dsh-plugin-prts-neuron) carries no license.
+refs/
+
+# The 110 MB source sticker pack. Only the compiled 128px set ships.
+assets/蓝色大肥鱼/
+
+# Claude Code research notes that quote its bundled code.
+assets/ClaudeCode/_src/
+assets/ClaudeCode/candidates/
+assets/ClaudeCode/tweakcc-*.ts
+
+node_modules/
+*.log
+.DS_Store
+
+# Development artifacts: comparison sheets and screenshots, not shipped assets.
+assets/对比*.png
+assets/总览*.png
+assets/prts-原图.gif
