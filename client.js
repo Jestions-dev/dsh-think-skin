@@ -613,6 +613,11 @@ window.__ModuleLoader__.load({
       const [coverFile, setCoverFile] = React.useState(null)
       const [coverPreview, setCoverPreview] = React.useState('')
       const [seedFiles, setSeedFiles] = React.useState([])
+      const [importDoc, setImportDoc] = React.useState(null)
+      const [importZip, setImportZip] = React.useState(null)
+      const [importPreviews, setImportPreviews] = React.useState({})
+      const [importCover, setImportCover] = React.useState(null)
+      const [importUrl, setImportUrl] = React.useState('')
       const [theme, setTheme] = React.useState(() => {
         try {
           const saved = window.localStorage.getItem('think-skin-theme')
@@ -780,6 +785,193 @@ window.__ModuleLoader__.load({
           .catch(() => null)
       }
 
+      /** Minimal zip reader: reads the central directory, stores entries as-is. */
+      function readZipEntries(buffer) {
+        const view = new DataView(buffer)
+        const bytes = new Uint8Array(buffer)
+        let end = -1
+        const floor = Math.max(0, bytes.length - 22 - 0xffff)
+        for (let i = bytes.length - 22; i >= floor; i -= 1) {
+          if (view.getUint32(i, true) === 0x06054b50) {
+            end = i
+            break
+          }
+        }
+        if (end < 0) throw new Error('不是 zip 文件')
+        const count = view.getUint16(end + 10, true)
+        let cursor = view.getUint32(end + 16, true)
+        const entries = new Map()
+        for (let i = 0; i < count; i += 1) {
+          if (view.getUint32(cursor, true) !== 0x02014b50) break
+          const method = view.getUint16(cursor + 10, true)
+          const compressed = view.getUint32(cursor + 20, true)
+          const nameLength = view.getUint16(cursor + 28, true)
+          const extraLength = view.getUint16(cursor + 30, true)
+          const commentLength = view.getUint16(cursor + 32, true)
+          const localOffset = view.getUint32(cursor + 42, true)
+          const name = new TextDecoder().decode(bytes.subarray(cursor + 46, cursor + 46 + nameLength))
+          const localName = view.getUint16(localOffset + 26, true)
+          const localExtra = view.getUint16(localOffset + 28, true)
+          const start = localOffset + 30 + localName + localExtra
+          entries.set(name, { method, raw: bytes.subarray(start, start + compressed) })
+          cursor += 46 + nameLength + extraLength + commentLength
+        }
+        return entries
+      }
+
+      /** Stored entries pass through; deflated ones go through DecompressionStream. */
+      async function entryBytes(entry) {
+        if (entry.method === 0) return entry.raw
+        const stream = new Blob([entry.raw]).stream().pipeThrough(new DecompressionStream('deflate-raw'))
+        return new Uint8Array(await new Response(stream).arrayBuffer())
+      }
+
+            /** Save a JSON payload as a download. */
+      function download(name, text) {
+        const blob = new Blob([text], { type: 'application/json' })
+        const href = URL.createObjectURL(blob)
+        const anchor = document.createElement('a')
+        anchor.href = href
+        anchor.download = name
+        anchor.click()
+        window.setTimeout(() => URL.revokeObjectURL(href), 1000)
+      }
+
+      function exportPack() {
+        if (current === undefined) return
+        setNote('导出中…')
+        fetch(ROUTE + '/export', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ pack: current.id }),
+        })
+          .then((response) => {
+            if (!response.ok) {
+              return response.text().then((t) => Promise.reject(new Error(t)))
+            }
+            return response.blob()
+          })
+          .then((blob) => {
+            const href = URL.createObjectURL(blob)
+            const anchor = document.createElement('a')
+            anchor.href = href
+            anchor.download = current.id + '.tskin.zip'
+            anchor.click()
+            window.setTimeout(() => URL.revokeObjectURL(href), 1000)
+            setNote('已导出 ' + Math.round(blob.size / 1024) + ' KB')
+          })
+          .catch((error) => setNote('导出失败：' + error.message))
+      }
+
+      /** Read a pack file in the browser so the page can preview it first. */
+      function adoptImport(document, zipBytes, previews) {
+        setImportDoc(document)
+        setImportZip(zipBytes)
+        setImportPreviews(previews)
+        const images = Array.isArray(document.pack.images) ? document.pack.images : []
+        setImportCover(document.pack.cover || (images[0] === undefined ? null : images[0].file))
+        setNote('已载入 ' + images.length + ' 张图，可以换封面或直接导入')
+      }
+
+      function loadPackFile(files) {
+        const file = files[0]
+        if (file === undefined) return
+        const isZip = /\.zip$/i.test(file.name)
+        if (!isZip) {
+          file.text()
+            .then((text) => {
+              const document = JSON.parse(text)
+              if (document.format !== 'dsh-think-skin/pack') {
+                setNote('这不是套组文件')
+                return
+              }
+              const previews = {}
+              for (const image of document.pack.images || []) {
+                if (typeof image.data === 'string') {
+                  previews[image.file] = 'data:image/gif;base64,' + image.data
+                }
+              }
+              adoptImport(document, null, previews)
+            })
+            .catch((error) => setNote('文件解析失败：' + error.message))
+          return
+        }
+
+        file.arrayBuffer()
+          .then(async (buffer) => {
+            const entries = readZipEntries(buffer)
+            const manifestEntry = entries.get('pack.json')
+            if (manifestEntry === undefined) {
+              setNote('压缩包里没有 pack.json')
+              return
+            }
+            const document = JSON.parse(new TextDecoder().decode(await entryBytes(manifestEntry)))
+            if (document.format !== 'dsh-think-skin/pack') {
+              setNote('这不是套组文件')
+              return
+            }
+            const previews = {}
+            for (const image of document.pack.images || []) {
+              const entry = entries.get(image.file)
+              if (entry === undefined) continue
+              const bytes = await entryBytes(entry)
+              previews[image.file] = URL.createObjectURL(new Blob([bytes], { type: 'image/gif' }))
+            }
+            adoptImport(document, buffer, previews)
+          })
+          .catch((error) => setNote('解压失败：' + error.message))
+      }
+
+      function finishImport(receipt) {
+        setNote('已导入「' + receipt.pack + '」，' + receipt.images + ' 张图')
+        setImportDoc(null)
+        setImportCover(null)
+        setImportUrl('')
+        setDetail(null)
+        load(true)
+      }
+
+      function runImport() {
+        if (importDoc === null) {
+          setNote('先选一个套组文件')
+          return
+        }
+        setNote('导入中…')
+        if (importZip !== null) {
+          // zip 直接原样上传，宿主那边解；封面改动通过请求头带过去
+          fetch(ROUTE + '/import', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/zip',
+              'x-ts-cover': encodeURIComponent(importCover === null ? '' : importCover),
+            },
+            body: importZip,
+          })
+            .then((response) => (response.ok
+              ? response.json()
+              : response.text().then((t) => Promise.reject(new Error(t)))))
+            .then(finishImport)
+            .catch((error) => setNote('导入失败：' + error.message))
+          return
+        }
+        const document = { ...importDoc, pack: { ...importDoc.pack, cover: importCover } }
+        post(ROUTE + '/import', { file: document })
+          .then(finishImport)
+          .catch((error) => setNote('导入失败：' + error.message))
+      }
+
+      function importFromUrl() {
+        const url = importUrl.trim()
+        if (url === '') {
+          setNote('先填一个 URL')
+          return
+        }
+        setNote('下载中…')
+        post(ROUTE + '/import', { url })
+          .then(finishImport)
+          .catch((error) => setNote('下载导入失败：' + error.message))
+      }
+
       function upload(files) {
         const list = Array.from(files || [])
         if (list.length === 0) return
@@ -808,11 +1000,13 @@ window.__ModuleLoader__.load({
       }
 
       function openGeneric() {
+        setNote('')
         setDetail({ kind: 'generic' })
         setDraft((current === undefined ? [] : current.fallbackTexts || []).join('\n'))
       }
 
       function openImage(image) {
+        setNote('')
         setDetail({ kind: 'image', id: image.id, name: image.name })
         setDraft((image.texts || []).join('\n'))
       }
@@ -832,6 +1026,136 @@ window.__ModuleLoader__.load({
       }
 
       // ---- detail view -------------------------------------------------------
+
+      if (detail !== null && detail.kind === 'import') {
+        const images = importDoc === null || !Array.isArray(importDoc.pack.images)
+          ? []
+          : importDoc.pack.images
+        return h('div', rootProps,
+          h('div', { style: { ...S.row, justifyContent: 'space-between' } },
+            h('strong', { style: { fontSize: '14px' } }, '导入套组'),
+            h('button', {
+              type: 'button',
+              className: 'ts-btn',
+              style: S.btn,
+              onClick: () => {
+                setDetail(null)
+                setImportDoc(null)
+              },
+            }, '返回'),
+          ),
+
+          h('div', { style: { ...S.row, alignItems: 'flex-start', gap: '20px' } },
+            h('div', { style: { ...S.card, ...S.cardOn, cursor: 'default', flex: 'none' } },
+              importCover === null
+                ? h('div', { style: S.cardArtEmpty }, '空')
+                : h('img', {
+                  // 还没导入时它在存储里不存在，用浏览器刚解出来的对象 URL
+                  src: importPreviews[importCover] || imageUrl(importCover),
+                  style: S.cardArt,
+                  alt: '',
+                }),
+              h('div', { style: S.cardName },
+                importDoc === null ? '未载入' : (importDoc.pack.id || '导入的套')),
+            ),
+            h('div', { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '12px' } },
+              h('div', null,
+                h('span', { style: S.label }, '本地文件（整份复制进内部存储）'),
+                h('div', { style: S.row },
+                  h(FilePick, {
+                    label: '选 .zip',
+                    accept: '.zip,application/zip',
+                    multiple: false,
+                    onFiles: loadPackFile,
+                  }),
+                  h(FilePick, {
+                    label: '选旧版 .json',
+                    accept: '.json,application/json',
+                    multiple: false,
+                    onFiles: loadPackFile,
+                  }),
+                  h('span', { style: S.hint },
+                    importDoc === null ? '未选择' : images.length + ' 张图已载入'),
+                ),
+              ),
+              h('div', null,
+                h('span', { style: S.label }, '或者从 URL 下载（由宿主下载，绕过跨域）'),
+                h('div', { style: S.row },
+                  h('input', {
+                    value: importUrl,
+                    placeholder: 'https://example.com/pack.zip',
+                    style: { ...S.field, flex: 1, minWidth: '220px' },
+                    onChange: (event) => setImportUrl(event.target.value),
+                    onKeyDown: (event) => {
+                      if (event.key === 'Enter') importFromUrl()
+                    },
+                  }),
+                  h('button', {
+                    type: 'button',
+                    className: 'ts-btn',
+                    style: S.btn,
+                    onClick: importFromUrl,
+                  }, '下载并导入'),
+                ),
+              ),
+              images.length === 0
+                ? null
+                : h('div', null,
+                  h('span', { style: S.label }, '换封面（点一张，导入后它就是封面）'),
+                  h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '6px' } },
+                    images.slice(0, 60).map((image, index) => h('img', {
+                      key: 'cover' + index,
+                      src: importPreviews[image.file] || '',
+                      alt: '',
+                      onClick: () => setImportCover(image.file),
+                      style: {
+                        width: '44px',
+                        height: '44px',
+                        objectFit: 'contain',
+                        borderRadius: '6px',
+                        cursor: 'pointer',
+                        background: 'rgba(127,127,127,.10)',
+                        outline: importCover === image.file ? '2px solid #4c8bf5' : 'none',
+                      },
+                    })),
+                  ),
+                ),
+            ),
+          ),
+
+          h('div', { style: S.row },
+            h('button', {
+              type: 'button',
+              className: 'ts-btn',
+              style: S.btn,
+              onClick: runImport,
+            }, '导入'),
+            h('span', { style: S.hint }, note),
+          ),
+
+          // 小广告：作者自己的下载器
+          h('div', {
+            style: {
+              marginTop: '6px',
+              padding: '10px 14px',
+              borderRadius: '10px',
+              border: '1px dashed rgba(127,127,127,.35)',
+              background: 'rgba(127,127,127,.05)',
+              fontSize: '12px',
+              lineHeight: 1.7,
+              opacity: 0.75,
+            },
+          },
+            h('strong', { style: { fontWeight: 600 } }, '顺带一提'),
+            h('br'),
+            'URL 只认直链：对象存储、GitHub raw、你自己的静态服务器都行；网盘分享页拿不到直链，用不了。',
+            h('br'),
+            '推荐作者自己的 DLS（下载服务器插件）：多线程 + 断点续传，几十 MB 的包下起来稳一些。',
+            h('br'),
+            h('span', { style: { opacity: 0.7 } }, '（只是推荐，这里和 DLS 没有联动。）'),
+          ),
+        )
+      }
 
       if (detail !== null && detail.kind === 'create') {
         return h('div', rootProps,
@@ -1008,11 +1332,27 @@ window.__ModuleLoader__.load({
               style: S.card,
               onClick: () => {
                 setNewName('')
+                setNote('')
                 setDetail({ kind: 'create' })
               },
             },
               h('div', { style: S.cardArtEmpty }, '+'),
               h('div', { style: S.cardName }, '新建'),
+            ),
+            h('button', {
+              type: 'button',
+              className: 'ts-card',
+              style: S.card,
+              onClick: () => {
+                setImportDoc(null)
+                setImportCover(null)
+                setImportUrl('')
+                setNote('')
+                setDetail({ kind: 'import' })
+              },
+            },
+              h('div', { style: S.cardArtEmpty }, '↧'),
+              h('div', { style: S.cardName }, '导入套组'),
             ),
           ),
         ),
@@ -1163,13 +1503,28 @@ window.__ModuleLoader__.load({
               directory: true,
               onFiles: (files) => upload(files.filter((f) => /\.(gif|png|webp|apng|jpe?g)$/i.test(f.name))),
             }),
+          ),
+        ),
+
+        // 套组级操作：和「导入图片」分开，别混在那一行里
+        h('div', null,
+          h('span', { style: S.label }, '套组操作'),
+          h('div', { style: S.row },
+            h('button', {
+              type: 'button',
+              className: 'ts-btn',
+              style: S.btn,
+              onClick: exportPack,
+              title: '导出成 .tskin.json，图片会内嵌在文件里',
+            }, '导出这个套'),
             current !== undefined && current.builtin !== true
               ? h('button', {
                 type: 'button',
-                style: S.danger,
+                className: 'ts-btn',
+                style: { ...S.btn, color: '#f2777a' },
                 onClick: () => deletePack(current.id),
               }, '删除这个套')
-              : null,
+              : h('span', { style: S.hint }, '内置套不能删除'),
           ),
         ),
 

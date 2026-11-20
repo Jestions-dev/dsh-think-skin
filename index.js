@@ -15,6 +15,7 @@
  */
 
 import fs from 'node:fs/promises'
+import zlib from 'node:zlib'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -37,6 +38,135 @@ const MIME = {
 const MAX_BODY = 1 << 20
 /** Largest accepted image upload. */
 const MAX_IMAGE = 32 * 1024 * 1024
+/** 套组文件（含 base64 图片）可以有几十 MB。 */
+const MAX_PACK_FILE = 192 * 1024 * 1024
+
+// ---------------------------------------------------------------- zip helpers
+
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256)
+  for (let n = 0; n < 256; n += 1) {
+    let c = n
+    for (let k = 0; k < 8; k += 1) c = (c & 1) === 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
+    table[n] = c >>> 0
+  }
+  return table
+})()
+
+function crc32(buffer) {
+  let c = 0xffffffff
+  for (let i = 0; i < buffer.length; i += 1) c = CRC_TABLE[(c ^ buffer[i]) & 0xff] ^ (c >>> 8)
+  return (c ^ 0xffffffff) >>> 0
+}
+
+/**
+ * Build a zip from `[{ name, data }]`.
+ *
+ * Entries deflate when that actually saves bytes, store otherwise — a GIF is
+ * already compressed, so most images end up stored and the archive stays close
+ * to the sum of the images. Names are flagged UTF-8 so non-ASCII pack names
+ * survive on every unzip tool.
+ */
+function makeZip(files) {
+  const parts = []
+  const central = []
+  let offset = 0
+  for (const file of files) {
+    const name = Buffer.from(file.name, 'utf8')
+    const deflated = zlib.deflateRawSync(file.data)
+    const useDeflate = deflated.length < file.data.length
+    const body = useDeflate ? deflated : file.data
+    const method = useDeflate ? 8 : 0
+    const crc = crc32(file.data)
+
+    const local = Buffer.alloc(30)
+    local.writeUInt32LE(0x04034b50, 0)
+    local.writeUInt16LE(20, 4)
+    local.writeUInt16LE(0x0800, 6)
+    local.writeUInt16LE(method, 8)
+    local.writeUInt16LE(0, 10)
+    local.writeUInt16LE(0x21, 12)
+    local.writeUInt32LE(crc, 14)
+    local.writeUInt32LE(body.length, 18)
+    local.writeUInt32LE(file.data.length, 22)
+    local.writeUInt16LE(name.length, 26)
+    local.writeUInt16LE(0, 28)
+    parts.push(local, name, body)
+
+    const entry = Buffer.alloc(46)
+    entry.writeUInt32LE(0x02014b50, 0)
+    entry.writeUInt16LE(20, 4)
+    entry.writeUInt16LE(20, 6)
+    entry.writeUInt16LE(0x0800, 8)
+    entry.writeUInt16LE(method, 10)
+    entry.writeUInt16LE(0, 12)
+    entry.writeUInt16LE(0x21, 14)
+    entry.writeUInt32LE(crc, 16)
+    entry.writeUInt32LE(body.length, 20)
+    entry.writeUInt32LE(file.data.length, 24)
+    entry.writeUInt16LE(name.length, 28)
+    entry.writeUInt16LE(0, 30)
+    entry.writeUInt16LE(0, 32)
+    entry.writeUInt16LE(0, 34)
+    entry.writeUInt16LE(0, 36)
+    entry.writeUInt32LE(0, 38)
+    entry.writeUInt32LE(offset, 42)
+    central.push(entry, name)
+
+    offset += local.length + name.length + body.length
+  }
+
+  const directory = Buffer.concat(central)
+  const end = Buffer.alloc(22)
+  end.writeUInt32LE(0x06054b50, 0)
+  end.writeUInt16LE(0, 4)
+  end.writeUInt16LE(0, 6)
+  end.writeUInt16LE(files.length, 8)
+  end.writeUInt16LE(files.length, 10)
+  end.writeUInt32LE(directory.length, 12)
+  end.writeUInt32LE(offset, 16)
+  end.writeUInt16LE(0, 20)
+  return Buffer.concat([...parts, directory, end])
+}
+
+/** Read a zip into `Map<name, Buffer>`. Handles stored and deflated entries. */
+function readZip(buffer) {
+  const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength)
+  let end = -1
+  const floor = Math.max(0, buffer.length - 22 - 0xffff)
+  for (let i = buffer.length - 22; i >= floor; i -= 1) {
+    if (view.getUint32(i, true) === 0x06054b50) {
+      end = i
+      break
+    }
+  }
+  if (end < 0) throw new Error('不是 zip 文件')
+
+  const count = view.getUint16(end + 10, true)
+  let cursor = view.getUint32(end + 16, true)
+  const files = new Map()
+  for (let i = 0; i < count; i += 1) {
+    if (view.getUint32(cursor, true) !== 0x02014b50) break
+    const method = view.getUint16(cursor + 10, true)
+    const compressedSize = view.getUint32(cursor + 20, true)
+    const nameLength = view.getUint16(cursor + 28, true)
+    const extraLength = view.getUint16(cursor + 30, true)
+    const commentLength = view.getUint16(cursor + 32, true)
+    const localOffset = view.getUint32(cursor + 42, true)
+    const name = buffer
+      .subarray(cursor + 46, cursor + 46 + nameLength)
+      .toString('utf8')
+
+    const localName = view.getUint16(localOffset + 26, true)
+    const localExtra = view.getUint16(localOffset + 28, true)
+    const start = localOffset + 30 + localName + localExtra
+    const raw = buffer.subarray(start, start + compressedSize)
+    files.set(name, method === 8 ? zlib.inflateRawSync(raw) : Buffer.from(raw))
+
+    cursor += 46 + nameLength + extraLength + commentLength
+  }
+  return files
+}
 
 /** Root of this plugin's data directory. */
 export function dataRoot() {
@@ -393,4 +523,246 @@ export function apply(ctx) {
   })
 
   ctx.effect(() => disposeUpload)
+
+  /**
+   * Export one pack as a self-contained JSON document.
+   *
+   * Images travel as base64 inside the file, so a pack can be handed to someone
+   * else as one attachment with no side files and no URLs that rot.
+   */
+  const disposeExport = ctx.webServer.register({
+    kind: 'exact',
+    path: ROUTE + '/export',
+    async handler(req, res) {
+      const fail = (status, message) => {
+        res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' })
+        res.end(message)
+      }
+      if (req.method !== 'POST') return fail(405, 'method not allowed')
+      try {
+        const body = JSON.parse((await readBody(req, MAX_BODY)).toString('utf8'))
+        const data = await load()
+        const pack = data.packs.find((p) => p.id === body.pack)
+        if (pack === undefined) return fail(404, '没有这个套')
+
+        // zip: pack.json + images/<name>，图片原样存，不经 base64
+        const entries = []
+        const images = []
+        let index = 0
+        for (const image of pack.images) {
+          const file = path.join(root, 'images', image.file.replace('/', path.sep))
+          let bytes = null
+          try {
+            bytes = await fs.readFile(file)
+          } catch {
+            bytes = null
+          }
+          if (bytes === null) continue
+          index += 1
+          const ext = path.extname(image.file).toLowerCase() || '.gif'
+          const name = 'images/i' + String(index).padStart(3, '0') + ext
+          entries.push({ name, data: bytes })
+          images.push({
+            id: image.id,
+            name: image.name,
+            texts: Array.isArray(image.texts) ? image.texts : [],
+            useFallback: image.useFallback !== false,
+            file: name,
+            sourceFile: image.file,
+          })
+        }
+
+        const manifest = {
+          format: 'dsh-think-skin/pack',
+          version: 2,
+          exportedAt: new Date().toISOString(),
+          pack: {
+            id: pack.id,
+            name: pack.name,
+            appearance: pack.appearance || {},
+            fallbackTexts: Array.isArray(pack.fallbackTexts) ? pack.fallbackTexts : [],
+            cover: (images.find((i) => i.sourceFile === pack.cover) || images[0] || {}).file || null,
+            images,
+          },
+        }
+        entries.unshift({ name: 'pack.json', data: Buffer.from(JSON.stringify(manifest, null, 1), 'utf8') })
+
+        const zip = makeZip(entries)
+        res.writeHead(200, {
+          'content-type': 'application/zip',
+          'content-disposition': 'attachment; filename="pack.zip"',
+          'cache-control': 'no-store',
+          'content-length': String(zip.length),
+        })
+        res.end(zip)
+      } catch (error) {
+        fail(400, String((error && error.message) || error))
+      }
+    },
+  })
+
+  ctx.effect(() => disposeExport)
+
+  /** Pick a pack id that is not taken yet. */
+  function freePackId(taken, wanted) {
+    if (!taken.has(wanted)) return wanted
+    for (let n = 2; n < 1000; n += 1) {
+      const candidate = wanted + ' ' + n
+      if (!taken.has(candidate)) return candidate
+    }
+    return wanted + ' ' + Date.now()
+  }
+
+  /**
+   * Import a pack document, copying every image into the store.
+   *
+   * Accepts either an inline document or a URL to fetch on the host, which
+   * sidesteps CORS and hotlink referer checks that a browser fetch would hit.
+   */
+  const disposeImport = ctx.webServer.register({
+    kind: 'exact',
+    path: ROUTE + '/import',
+    async handler(req, res) {
+      const fail = (status, message) => {
+        res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' })
+        res.end(message)
+      }
+      if (req.method !== 'POST') return fail(405, 'method not allowed')
+      let dir = null
+      try {
+        const body = await readBody(req, MAX_PACK_FILE)
+        const type = String(req.headers['content-type'] || '')
+
+        // 三种来源：zip 字节（本地/URL 下载）、旧版 JSON 载荷、服务端下载 URL
+        let document = null
+        let zipFiles = null
+
+        if (type.startsWith('application/zip')) {
+          zipFiles = readZip(body)
+          const manifest = zipFiles.get('pack.json')
+          if (manifest === undefined) return fail(400, '压缩包里没有 pack.json')
+          document = JSON.parse(manifest.toString('utf8'))
+        } else {
+          const request = JSON.parse(body.toString('utf8'))
+          if (request.file !== undefined) {
+            document = request.file
+          } else if (typeof request.url === 'string') {
+            let response
+            try {
+              response = await fetch(request.url, { redirect: 'follow' })
+            } catch (error) {
+              return fail(400, '下载失败：' + String((error && error.message) || error))
+            }
+            if (!response.ok) return fail(400, '下载失败：HTTP ' + response.status)
+            const downloaded = Buffer.from(await response.arrayBuffer())
+
+            // 网盘分享页、登录页、错误页都会返回 HTML；直接说清楚，别让用户猜
+            const head = downloaded.subarray(0, 512).toString('utf8').trim().toLowerCase()
+            const contentType = String(response.headers.get('content-type') || '').toLowerCase()
+            if (contentType.includes('text/html') || head.startsWith('<!doctype') || head.startsWith('<html')) {
+              return fail(
+                400,
+                '这个 URL 返回的是网页，不是文件。网盘分享页和需要登录的链接都不行，'
+                + '请用直链（对象存储、GitHub raw、你自己的静态服务器等）。',
+              )
+            }
+            const looksZip = downloaded.length > 4 && downloaded.readUInt32LE(0) === 0x04034b50
+            if (looksZip) {
+              zipFiles = readZip(downloaded)
+              const manifest = zipFiles.get('pack.json')
+              if (manifest === undefined) return fail(400, '压缩包里没有 pack.json')
+              document = JSON.parse(manifest.toString('utf8'))
+            } else {
+              document = JSON.parse(downloaded.toString('utf8'))
+            }
+          }
+        }
+        if (document === null || typeof document !== 'object') return fail(400, '没有内容')
+        if (document.format !== 'dsh-think-skin/pack') return fail(400, '不是套组文件')
+        const source = document.pack
+        if (source === null || typeof source !== 'object') return fail(400, '套组内容缺失')
+        const images = Array.isArray(source.images) ? source.images : []
+
+        const data = await load()
+        const taken = new Set(data.packs.map((p) => p.id))
+        const base = typeof source.id === 'string' && source.id.trim() !== ''
+          ? source.id.trim()
+          : '导入的套'
+        const id = freePackId(taken, base)
+
+        dir = path.join(root, 'images', id)
+        await fs.mkdir(dir, { recursive: true })
+
+        const stored = []
+        let cover = null
+        for (let index = 0; index < images.length; index += 1) {
+          const image = images[index]
+          const sourceName = typeof image.file === 'string' ? image.file : 'f.gif'
+          const ext = path.extname(sourceName).toLowerCase()
+          if (!Object.prototype.hasOwnProperty.call(MIME, ext)) continue
+          let bytes = null
+          if (zipFiles !== null) {
+            bytes = zipFiles.get(sourceName) === undefined ? null : zipFiles.get(sourceName)
+          } else if (typeof image.data === 'string' && image.data.length > 0) {
+            bytes = Buffer.from(image.data, 'base64')
+          }
+          if (bytes === null) continue
+          const file = 'i' + String(index + 1).padStart(3, '0') + ext
+          await fs.writeFile(path.join(dir, file), bytes)
+          stored.push({
+            id: file.slice(0, -ext.length),
+            file: id + '/' + file,
+            name: typeof image.name === 'string' ? image.name : '',
+            texts: Array.isArray(image.texts) ? image.texts : [],
+            useFallback: image.useFallback !== false,
+          })
+          if (image.file === source.cover) cover = id + '/' + file
+        }
+        if (stored.length === 0) return fail(400, '套组里没有可导入的图片')
+
+        // 用户在导入页换过封面：按文件名对上，覆盖清单里的默认值
+        const wanted = req.headers['x-ts-cover']
+        if (typeof wanted === 'string' && wanted !== '') {
+          try {
+            const base = path.basename(decodeURIComponent(wanted))
+            const hit = stored.find((entry) => path.basename(entry.file) === base)
+            if (hit !== undefined) cover = hit.file
+          } catch {
+            /* 头部解不开就沿用清单里的封面 */
+          }
+        }
+        if (cover === null) cover = stored[0].file
+
+        data.packs.push({
+          id,
+          name: id,
+          builtin: false,
+          cover,
+          fallbackTexts: Array.isArray(source.fallbackTexts) && source.fallbackTexts.length > 0
+            ? source.fallbackTexts
+            : ['正在思考'],
+          appearance: source.appearance !== null && typeof source.appearance === 'object'
+            ? source.appearance
+            : {},
+          images: stored,
+        })
+        if (!data.active) data.active = id
+        await save(data)
+
+        const payload = JSON.stringify({ ok: true, pack: id, images: stored.length, cover })
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+          'content-length': String(Buffer.byteLength(payload)),
+        })
+        res.end(payload)
+      } catch (error) {
+        if (dir !== null) await fs.rm(dir, { recursive: true, force: true }).catch(() => {})
+        fail(400, String((error && error.message) || error))
+      }
+    },
+  })
+
+  ctx.effect(() => disposeImport)
+
 }
