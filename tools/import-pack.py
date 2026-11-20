@@ -6,8 +6,12 @@ the host half serves at `/think-skin/pack.json`.
 
 Usage:
     python tools/import-pack.py --pack 蓝色大肥鱼 --dir assets/compiled-128/蓝色大肥鱼
-    python tools/import-pack.py --pack 蓝色大肥鱼 --dir ... --texts tools/texts-fish.json
-    python tools/import-pack.py --claudecode          # placeholder + 179 verbs
+    python tools/import-pack.py --claudecode
+
+Picture text pools live in `assets/texts/<pack>.json`, written by
+`tools/export-texts.py` from whatever the settings panel produced. When that
+file exists it wins: it carries both the phrases and each image's
+"also use the generic pool" flag.
 """
 
 import argparse
@@ -54,6 +58,15 @@ def action_of(filename):
     return stem.strip()
 
 
+def load_text_snapshot(pack_id):
+    """`assets/texts/<pack>.json`, or None when the pack has no curated copy."""
+    path = os.path.join(ROOT, "assets", "texts", pack_id + ".json")
+    if not os.path.exists(path):
+        return None
+    with io.open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
 def load_pack_json(root):
     path = os.path.join(root, "pack.json")
     if not os.path.exists(path):
@@ -70,7 +83,8 @@ def save_pack_json(root, data):
     return path
 
 
-def install(pack_id, sources, fallback_texts, texts_by_name=None, appearance=None):
+def install(pack_id, sources, fallback_texts, texts_by_name=None, appearance=None,
+            snapshot=None):
     """Copy images and merge one pack into pack.json."""
     root = store_root()
     target = os.path.join(root, "images", pack_id)
@@ -85,19 +99,24 @@ def install(pack_id, sources, fallback_texts, texts_by_name=None, appearance=Non
         file_name = "f%03d%s" % (index, ext)
         shutil.copyfile(src, os.path.join(target, file_name))
         texts = []
-        if texts_by_name and name in texts_by_name:
+        use_fallback = True
+        entry = (snapshot or {}).get("images", {}).get(name)
+        if entry is not None:
+            texts = entry.get("texts") or []
+            use_fallback = entry.get("useFallback", True) is not False
+        elif texts_by_name and name in texts_by_name:
             texts = texts_by_name[name]
         elif name:
             texts = ["正在%s" % name]
         images.append({"id": "f%03d" % index, "file": "%s/%s" % (pack_id, file_name),
-                       "name": name, "texts": texts})
+                       "name": name, "texts": texts, "useFallback": use_fallback})
 
     data = load_pack_json(root)
     data["packs"] = [p for p in data["packs"] if p["id"] != pack_id]
     data["packs"].append({
         "id": pack_id,
         "name": pack_id,
-        "fallbackTexts": fallback_texts,
+        "fallbackTexts": (snapshot or {}).get("fallbackTexts") or fallback_texts,
         "appearance": appearance or APPEARANCE.get(pack_id, {}),
         "images": images,
     })
@@ -128,7 +147,7 @@ def main():
         with io.open(verbs_path, encoding="utf-8") as fh:
             verbs = json.load(fh)["verbs"]
         placeholder = os.path.join(ROOT, "assets", "ClaudeCode", "placeholder.png")
-        install("ClaudeCode", [placeholder], verbs)
+        install("ClaudeCode", [placeholder], verbs, snapshot=load_text_snapshot("ClaudeCode"))
         return
 
     if not args.pack or not args.dir:
@@ -147,7 +166,8 @@ def main():
     if args.fallback:
         with io.open(args.fallback, encoding="utf-8") as fh:
             fallback = json.load(fh)
-    install(args.pack, sources, fallback, texts_by_name)
+    install(args.pack, sources, fallback, texts_by_name,
+            snapshot=load_text_snapshot(args.pack))
 
 
 if __name__ == "__main__":

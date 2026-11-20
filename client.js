@@ -492,6 +492,11 @@ window.__ModuleLoader__.load({
         if (previous !== null && previous !== '' && previous !== text && next.includes(previous)) {
           next = next.split(previous).join(text)
         }
+        // 上游写的是「文案，用时 3秒」。文案常常自带标点，紧跟一个逗号很挤，
+        // 换成两个空格；React 每秒写回原样，所以每次都要重新替换。
+        // 只认「，用时」这一处，文案内部的逗号不受影响。
+        // 间隔：一个全角空格 + 一个半角空格（约 1.25em），比原来两个半角宽一倍多
+        if (next.includes('，用时')) next = next.split('，用时').join('\u3000 用时')
         return next
       }
 
@@ -1630,6 +1635,39 @@ window.__ModuleLoader__.load({
                   'aria-checked': detailImage !== undefined && detailImage.useFallback !== false,
                 }),
               ),
+
+          // 改文案时要看得见图：左边放大图，右边一行小预览
+          detail.kind === 'image' && detailImage !== undefined
+            ? h('div', { style: { ...S.row, alignItems: 'flex-start', gap: '18px' } },
+              h('img', {
+                src: imageUrl(detailImage.file),
+                alt: '',
+                style: {
+                  width: '96px',
+                  height: '96px',
+                  objectFit: 'contain',
+                  borderRadius: '10px',
+                  background: 'rgba(127,127,127,.08)',
+                  flex: 'none',
+                },
+              }),
+              h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
+                h('span', { style: { fontSize: '12px', opacity: 0.6 } },
+                  detailImage.name || detailImage.id),
+                h('div', { style: { ...S.row, gap: '8px' } },
+                  h('span', { style: S.hint }, '预览'),
+                  h(PreviewLine, {
+                    lines: (draft.split('\n').map((l) => l.trim()).filter((l) => l !== '')),
+                    typing: true,
+                    gradient: gradient,
+                    mode: gradientMode,
+                    speed: gradientSpeed,
+                    gradientMode: gradientMode,
+                  }),
+                ),
+              ),
+            )
+            : null,
 
           h('div', null,
             h('span', { style: S.label }, '一行一句；这张图会从这些句子里随机'),

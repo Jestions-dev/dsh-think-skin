@@ -87,6 +87,8 @@ python tools/import-pack.py --claudecode     # placeholder + the 179 verbs
 | 酒狐 | 1 | One fox sticker, 128×128 |
 | Claude Code | 1 | 盲文/字符画转圈 + 184 个真动词（从 claude.exe 2.1.328 提取） |
 
+内置套的句子是逐张手写的，不是从文件名生成的。
+
 **帧率不统一——每个包保留源文件自己的节奏**：鱼是 20 ms 一帧，狐狸是 100 ms 一帧。
 强行统一帧率是曾经的 bug：狐狸转快一倍，鱼丢掉三分之二的帧。见
 [tools/compile-pack.py](tools/compile-pack.py)。

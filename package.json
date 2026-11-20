@@ -1,6 +1,6 @@
 {
   "name": "dsh-think-skin",
-  "version": "0.3.2",
+  "version": "1.0.0",
   "description": "Reskin the DSH thinking row: your own image, your own words, double random.",
   "type": "module",
   "license": "MIT",
@@ -33,7 +33,9 @@
     "assets/ClaudeCode/verbs.json",
     "assets/ClaudeCode/placeholder.png",
     "assets/酒狐",
-    "tools/compile-pack.py"
+    "tools/compile-pack.py",
+    "assets/texts",
+    "tools/export-texts.py"
   ],
   "dsh": {
     "bundle": {
