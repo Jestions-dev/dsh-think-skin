@@ -31,22 +31,37 @@ E8e = Nr(() => {
 
 ---
 
-## 2. 动画：正走一遍再倒回来（呼吸），每帧 2 秒
+## 2. 动画：余弦呼吸，一整趟 2 秒
+
+**⚠️ 上面这段早期结论是错的，以本节为准。**
 
 ```js
-LYd = E8e()
-ALo = [...LYd, ...[...LYd].reverse()]        // 12 帧
-MYd = 2000                                    // 每帧 2000 ms
-OYd = {r:171, g:43, b:63}                     // 目标色
-NYd = {r:0, g:0, b:0}
-TLo = "\u25CF"                                // ● 强度高时换成实心圆
+Oon(e, t) = (1 - Math.cos(2 * Math.PI * e / t)) / 2    // 余弦，0 → 1 → 0
+Qm_ = 2000                                             // 一整趟的毫秒数
+sh_(e) = Math.round(Oon(e, Qm_) * (E8e().length - 1))  // 帧 = 呼吸值 × (n-1)
 ```
+
+**`Qm_ = 2000` 是「一个来回」的总时长，不是「每帧」。**
+**所以帧大约每 180ms 跳一档，2 秒走完「小 → 大 → 小」。**
 
 ```js
-let eie = ALo[ldC % ALo.length]               // 取帧
+ALo = [...LYd, ...[...LYd].reverse()]
+let eie = ALo[ldC % ALo.length]
 ```
 
-**一个完整周期 = 12 × 2000 ms = 24 秒。**
+**`ALo` 的倒序一半其实是冗余的**：`frame` 只取到 0..5，永远不会进到倒序段；
+来回完全由余弦曲线给出。照抄数组反而会变成"正转一圈再倒转一圈"。
+
+**另一组是终端 spinner，定义只有一处：**
+
+```js
+spinner: {
+  interval: 80,
+  frames: ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'].map(e => chalk.yellow(e))
+}
+```
+
+**盲文、80ms/帧、黄色——这才是官方转圈本体。上面那组字形是另一个组件。**
 
 ---
 
@@ -61,8 +76,20 @@ jsx(H, { "aria-hidden": true, flexWrap: "wrap", height: 1, width: 2, children: p
 jsx(h, { color: nL(pdC), bold: cUe >= 0.5, children: TLo })
 ```
 
-**「呼吸」= 字形从小长到大 **+** 颜色从暗插值到 `rgb(171,43,63)`。**
-**两件事同时发生。只做字形变化（GIF 常见做法）做不像。**
+**「呼吸」= 字形从小长到大 **+** 颜色变化。**
+**但颜色不是跟着字形走的**：组件签名是
+
+```js
+{ frame, messageColor, stalledIntensity, thinkingIntensity, reducedMotion, time }
+```
+
+`frame` 决定字形；`stalledIntensity>0` 时才把颜色混向 `rgb(171,43,63)`；
+`thinkingIntensity>0` 走向 warning 色；`reducedMotion` 时直接显示 `●`。
+**正常状态下颜色就是主题的消息色。**
+
+**我们自己实现时踩过两个坑：**
+1. 把 `stalledIntensity` 当成了"帧亮度"，于是字形越大越红——错
+2. 给盲文也套了正序+倒序，于是出现"一会儿顺时针一会儿逆时针"——错
 
 ---
 
@@ -117,14 +144,14 @@ overrideMessage → activeForm → subject → 随机动词
 
 ## 8. 如果要做得「真的像」
 
-**不能用 GIF。** 必须是：
+**不能用 GIF。** 已实现为文本模式：
 
 ```
-不是插 <img>，而是插 <span>
-每 2000 ms 换一个字符：· ✢ * ✶ ✻ ✽ ✻ ✶ * ✢ ·
-颜色在「当前文字色 ↔ rgb(171,43,63)」之间按强度插值
-强度到顶时换 ● 并加粗
-占 1 行 × 2 列，不是正方形
+插 <span>，不是 <img>
+盲文   10 帧单向循环，每帧 interval 毫秒（官方 80）
+字符画 余弦呼吸，一整趟 period 毫秒（官方 2000），字号跟着变化
+颜色   固定色，或跟随主题
+文字   逐字打出 + 3 字符宽的亮带扫过（glimmerIndex = floor(t/200)）
 ```
 
-**这件事冻结在 M7 之后做（文本模式）。当前 Claude Code 套用占位图 + 真动词表。**
+**面板里两种模式可切，时长分开存（interval 是每帧，period 是一整趟）。**
