@@ -53,12 +53,45 @@ window.__ModuleLoader__.load({
     ].join(';')
 
     const FALLBACK_TEXTS = ['正在思考']
+
+    /**
+     * Claude Code's spinner, taken from its binary: six glyphs that grow one
+     * step at a time, played forward then backward, 2 s per step, with the
+     * colour sliding toward rgb(171,43,63) as the glyph grows.
+     */
+    // Claude Code 的 spinner 定义（二进制里唯一的一处）：
+    //   spinner: { interval: 80, frames: ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'].map(yellow) }
+    const SPIN_BRAILLE = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+    /**
+     * 字符画那组，正走再倒回。
+     *
+     * 二进制里的默认数组是 ['·','✢','*','✶','✻','✽']。其中 `*`(U+002A) 和
+     * `✶`(U+2736 实心六角星) 是锐利字形——终端等宽字体下还能看，浏览器里
+     * 就是尖角，和 `✢ ✻ ✽` 这族水滴形完全不搭。所以只留水滴形那一族，
+     * 顺序按"从点长成花"排：点 → 四瓣 → 六瓣 → 八瓣。
+     */
+    const SPIN_GLYPHS = ['·', '✢', '✻']
+
+    const SPIN_INTERVAL = 80
+    const SPIN_COOL = '#8b8f96'
+    const SPIN_HOT = '#ab2b3f'
+    const SPIN_ATTR = 'data-ts-spin'
+
     const DEFAULT_GRADIENT = ['#a8cdff', '#5b8dff']
 
     const React = require('react')
     const h = React.createElement
 
     const STYLE_TEXT = [
+      // 扫光带：最上层是一条 3 字符宽的白色亮带，位置由 --ts-gl 驱动
+      '[', GRAD_ATTR, '][data-ts-glimmer="1"] {',
+      'background-image:',
+      '  linear-gradient(100deg,',
+      '    transparent calc(var(--ts-gl, 50%) - 7%),',
+      '    rgba(255,255,255,.85) var(--ts-gl, 50%),',
+      '    transparent calc(var(--ts-gl, 50%) + 7%)),',
+      '  var(--ts-gradient);',
+      '}',
       '[', GRAD_ATTR, '] {',
       'background-image: var(--ts-gradient);',
       'background-size: 100% 100%;',
@@ -208,7 +241,9 @@ window.__ModuleLoader__.load({
 
     /** Read, advance, and store the row's thinking state. */
     function stateOf(row) {
-      if (pack === null || !Array.isArray(pack.images) || pack.images.length === 0) return null
+      if (pack === null) return null
+      const isSpinner = pack.spinner !== undefined && pack.spinner !== null
+      if (!isSpinner && (!Array.isArray(pack.images) || pack.images.length === 0)) return null
       const now = Date.now()
       const seconds = secondsOf(row)
       const lastSeconds = row.getAttribute('data-ts-sec')
@@ -225,7 +260,7 @@ window.__ModuleLoader__.load({
       let textIndex = storedText === null ? -1 : Number(storedText)
 
       if (isNewRun) {
-        imageIndex = pickIndex(pack.images.length, Number(storedImage ?? -1))
+        imageIndex = isSpinner ? 0 : pickIndex(pack.images.length, Number(storedImage ?? -1))
         textIndex = pickIndex(textsOf(pack.images[imageIndex]).length, -1)
         row.setAttribute('data-ts-next', nextAt(now))
       } else if (now >= due) {
@@ -243,6 +278,170 @@ window.__ModuleLoader__.load({
     }
 
     /** Put our image where the row's own icon box is, swapping it when the pick changes. */
+    /** Mix two hex colours; used for the spinner's colour ramp. */
+    function lerpHex(a, b, t) {
+      const one = parseHex(a)
+      const two = parseHex(b)
+      if (one === null || two === null) return a
+      return '#' + one
+        .map((v, i) => Math.round(v + (two[i] - v) * t).toString(16).padStart(2, '0'))
+        .join('')
+    }
+
+    /**
+     * Draw the breathing glyph instead of an image.
+     *
+     * The frame comes from a timestamp stamped on the row rather than from a
+     * timer: React rewrites the row every second, and a timer would restart.
+     */
+    function swapSpinner(row, spinnerConfig) {
+      // 模式决定用哪组字符。以前 frames 会盖掉模式，于是"切成字符画还在转盲文"。
+      const mode = spinnerConfig.mode === 'glyph' ? 'glyph' : 'braille'
+      const glyphs = mode === 'glyph' ? SPIN_GLYPHS : SPIN_BRAILLE
+      // 呼吸字形正反来回；盲文是单向转圈
+      const frames = mode === 'glyph'
+        ? glyphs.concat(glyphs.slice(0, -1).reverse())
+        : glyphs
+      // 两种模式的时长含义不同：盲文是"每帧多久"，字符画是"一整趟多久"。
+      // 分开存，切换模式才不会把一个模式的数字带到另一个模式里。
+      const interval = mode === 'glyph'
+        ? (Number.isFinite(Number(spinnerConfig.period))
+          ? Number(spinnerConfig.period)
+          : 2000)
+        : (Number.isFinite(Number(spinnerConfig.interval))
+          ? Number(spinnerConfig.interval)
+          : 165)
+      const cool = typeof spinnerConfig.cool === 'string' ? spinnerConfig.cool : SPIN_COOL
+      const hot = typeof spinnerConfig.hot === 'string' ? spinnerConfig.hot : SPIN_HOT
+      const fixed = typeof spinnerConfig.color === 'string'
+        ? spinnerConfig.color
+        : (mode === 'glyph' ? '' : '#e5c07b')
+
+      const existing = row.querySelector('span[' + SPIN_ATTR + ']')
+      if (existing !== null) {
+        // 配置变了就地更新；已经画出来的标记不会自己重建
+        const signature = [frames.join(''), interval, cool, hot, fixed, mode].join('|')
+        if (existing.getAttribute('data-ts-sig') !== signature) {
+          existing.setAttribute('data-ts-glyphs', frames.join(''))
+          existing.setAttribute('data-ts-interval', String(interval))
+          existing.setAttribute('data-ts-cool', cool)
+          existing.setAttribute('data-ts-hot', hot)
+          existing.setAttribute('data-ts-fixed', fixed)
+          existing.setAttribute('data-ts-count', String(glyphs.length))
+          existing.setAttribute('data-ts-breathe', mode === 'glyph' ? '1' : '0')
+          existing.setAttribute('data-ts-sig', signature)
+          existing.setAttribute('data-ts-since', String(Date.now()))
+        }
+        return
+      }
+
+      const svg = row.querySelector('svg')
+      const box = svg === null ? null : svg.parentElement
+      if (box === null) return
+
+      const mark = document.createElement('span')
+      mark.setAttribute(SPIN_ATTR, '')
+      mark.setAttribute('aria-hidden', 'true')
+      mark.setAttribute('data-ts-glyphs', frames.join(''))
+      mark.setAttribute('data-ts-interval', String(interval))
+      mark.setAttribute('data-ts-cool', cool)
+      mark.setAttribute('data-ts-hot', hot)
+      // chalk 的 yellow ≈ #e5c07b，Claude Code 的转圈就是这个颜色
+      mark.setAttribute('data-ts-fixed', fixed)
+      mark.setAttribute('data-ts-count', String(glyphs.length))
+      mark.setAttribute('data-ts-breathe', mode === 'glyph' ? '1' : '0')
+      mark.setAttribute('data-ts-sig',
+        [frames.join(''), interval, cool, hot, fixed, mode].join('|'))
+      mark.setAttribute('data-ts-since', String(Date.now()))
+      mark.style.cssText = [
+        'width:32px',
+        'height:32px',
+        'flex:none',
+        'display:inline-flex',
+        'align-items:center',
+        'justify-content:center',
+        'font-size:24px',
+        'line-height:1',
+        'font-family:ui-monospace,SFMono-Regular,Menlo,monospace',
+      ].join(';')
+      box.style.setProperty('display', 'none')
+      box.before(mark)
+    }
+
+    /**
+     * Move the glimmer band across every painted text run.
+     *
+     * Claude Code walks a highlight three characters wide over the message at
+     * 200 ms per step; we reproduce the cadence and let it ride on top of the
+     * static gradient.
+     */
+    function tickGlimmer(root, now) {
+      let nodes
+      try {
+        nodes = root.querySelectorAll('[data-ts-glimmer="1"]')
+      } catch {
+        return
+      }
+      for (const element of nodes) {
+        const since = Number(element.getAttribute('data-ts-gl-since')) || now
+        const length = (element.textContent || '').length || 12
+        const span = length + 6
+        // 和打字同速：亮带每步走一个字符，两条动效不会互相打架
+        const step = TYPE_MS
+        const pos = Math.floor((now - since) / step) % span
+        const percent = ((pos / span) * 120 - 10).toFixed(2) + '%'
+        if (element.style.getPropertyValue('--ts-gl') !== percent) {
+          element.style.setProperty('--ts-gl', percent)
+        }
+      }
+    }
+
+    /** Advance every visible spinner to the frame the clock says it is on. */
+    function tickSpinners(root) {
+      let marks
+      try {
+        marks = root.querySelectorAll('span[' + SPIN_ATTR + ']')
+      } catch {
+        return
+      }
+      const now = Date.now()
+      for (const mark of marks) {
+        const frames = (mark.getAttribute('data-ts-glyphs') || '').split('')
+        if (frames.length === 0) continue
+        const interval = Number(mark.getAttribute('data-ts-interval')) || SPIN_INTERVAL
+        const since = Number(mark.getAttribute('data-ts-since')) || now
+        const elapsed = now - since
+        const breathe = mark.getAttribute('data-ts-breathe') === '1'
+
+        // 官方：Oon(t) = (1 - cos(2πt / 2000)) / 2，帧 = round(Oon * (n-1))
+        // 也就是说 2000ms 走完「小→大→小」一整趟，不是每帧 2000ms。
+        let index
+        let phase
+        if (breathe) {
+          const period = interval > 0 ? interval : 2000
+          phase = (1 - Math.cos(2 * Math.PI * elapsed / period)) / 2
+          index = Math.round(phase * (frames.length - 1))
+        } else {
+          index = Math.floor(elapsed / interval) % frames.length
+          phase = 0
+        }
+        const glyph = frames[index]
+        if (mark.textContent !== glyph) mark.textContent = glyph
+        // 固定色（例如 Claude Code 的黄色）直接套；没配颜色就跟着主题走。
+        // 只有 glyph 模式才做"卡住变红"的混色，而且那是独立强度，不跟帧。
+        // 字号跟着呼吸走：点最小，花最大。20px 上下浮动看不出形状差别，
+        // 加上尺寸变化，"从点长成花"才读得出来。
+        const size = Math.round((breathe ? 15 + phase * 11 : 22) * 10) / 10
+        const sizeText = size.toFixed(1) + 'px'
+        if (mark.style.fontSize !== sizeText) mark.style.fontSize = sizeText
+
+        const fixed = mark.getAttribute('data-ts-fixed')
+        if (fixed !== null && fixed !== '') {
+          if (mark.style.color !== fixed) mark.style.color = fixed
+        }
+      }
+    }
+
     function swapIcon(row, src) {
       const existing = row.querySelector(`img[${ICON_ATTR}]`)
       if (existing !== null) {
@@ -272,13 +471,25 @@ window.__ModuleLoader__.load({
      * our previous text, so a rotation reaches a string React has not rewritten.
      * @returns the elements that received new visible text, for gradient painting.
      */
-    function swapCopy(row, text) {
-      const previous = row.getAttribute('data-ts-last')
+    /** 每字符的揭示间隔：12 个字符约 1.1 秒打完。 */
+    const TYPE_MS = 90
+
+    function swapCopy(row, full) {
+      // 词条换了就重置打字进度；同一个词一直打，打完就停
+      if (row.getAttribute('data-ts-full') !== full) {
+        row.setAttribute('data-ts-full', full)
+        row.setAttribute('data-ts-typed-at', String(Date.now()))
+        row.setAttribute('data-ts-shown', '')
+      }
+      const startedAt = Number(row.getAttribute('data-ts-typed-at')) || Date.now()
+      const typed = Math.min(full.length, Math.max(1, Math.floor((Date.now() - startedAt) / TYPE_MS)))
+      const text = full.slice(0, typed)
+      const previous = row.getAttribute('data-ts-shown')
       const targets = new Set()
       const replaceIn = (value) => {
         let next = value
         if (next.includes(SOURCE_LABEL)) next = next.split(SOURCE_LABEL).join(text)
-        if (previous !== null && previous !== text && next.includes(previous)) {
+        if (previous !== null && previous !== '' && previous !== text && next.includes(previous)) {
           next = next.split(previous).join(text)
         }
         return next
@@ -301,7 +512,7 @@ window.__ModuleLoader__.load({
         if (next !== value) element.setAttribute(SHIMMER_ATTR, next)
       }
 
-      row.setAttribute('data-ts-last', text)
+      row.setAttribute('data-ts-shown', text)
       return targets
     }
 
@@ -325,6 +536,9 @@ window.__ModuleLoader__.load({
           gradient = 'linear-gradient(90deg, ' + colors.join(', ') + ')'
         }
       }
+      const glimmer = appearance === undefined || appearance.glimmer !== false
+      const glimmerable = glimmer && (mode === 'static' || mode === 'none')
+
       for (const element of targets) {
         if (!usable) {
           if (element.hasAttribute(GRAD_ATTR)) {
@@ -338,6 +552,15 @@ window.__ModuleLoader__.load({
           && element.getAttribute('data-ts-mode') === mode) continue
         element.setAttribute(GRAD_ATTR, '')
         element.setAttribute('data-ts-mode', mode)
+        if (glimmerable) {
+          if (element.getAttribute('data-ts-glimmer') !== '1') {
+            element.setAttribute('data-ts-glimmer', '1')
+            element.setAttribute('data-ts-gl-since', String(Date.now()))
+          }
+        } else if (element.hasAttribute('data-ts-glimmer')) {
+          element.removeAttribute('data-ts-glimmer')
+          element.style.removeProperty('--ts-gl')
+        }
         element.style.setProperty('--ts-gradient', gradient)
         const seconds = appearance !== undefined && Number.isFinite(Number(appearance.speed))
           ? Math.max(1, Math.min(60, Number(appearance.speed)))
@@ -360,13 +583,19 @@ window.__ModuleLoader__.load({
       } catch {
         return
       }
+      const spinner = pack.spinner !== undefined && pack.spinner !== null
+        ? pack.spinner
+        : null
+
       for (const row of rows) {
         const state = stateOf(row)
         if (state === null) continue
-        swapIcon(row, imageUrl(state.image.file))
+        if (spinner !== null) swapSpinner(row, spinner)
+        else swapIcon(row, imageUrl(state.image.file))
         const targets = swapCopy(row, state.text)
         applyGradient(targets, pack.appearance)
       }
+      tickSpinners(document)
     }
 
     /** Replace the in-memory pack after a save, then repaint. */
@@ -592,6 +821,113 @@ window.__ModuleLoader__.load({
         + ')'
     }
 
+    /**
+     * A live copy of the spinner mark, driven by the values in the form rather
+     * than the saved ones, so switching mode shows the result immediately.
+     */
+    function SpinPreview({ mode, interval, color }) {
+      const glyphs = mode === 'glyph' ? SPIN_GLYPHS : SPIN_BRAILLE
+      const [, setTick] = React.useState(0)
+      const startedAt = React.useRef(Date.now())
+      React.useEffect(() => {
+        startedAt.current = Date.now()
+      }, [mode, interval, color])
+      React.useEffect(() => {
+        const timer = window.setInterval(() => setTick((n) => n + 1), 40)
+        return () => window.clearInterval(timer)
+      }, [])
+
+      const elapsed = Date.now() - startedAt.current
+      let index
+      let phase
+      if (mode === 'glyph') {
+        const period = interval > 0 ? interval : 2000
+        phase = (1 - Math.cos((2 * Math.PI * elapsed) / period)) / 2
+        index = Math.round(phase * (glyphs.length - 1))
+      } else {
+        index = Math.floor(elapsed / Math.max(16, interval)) % glyphs.length
+        phase = 0
+      }
+      const size = mode === 'glyph' ? 15 + phase * 11 : 22
+      const shade = typeof color === 'string' && color !== ''
+        ? color
+        : (mode === 'glyph' ? 'currentColor' : '#e5c07b')
+
+      return h('span', {
+        style: {
+          width: '30px',
+          height: '30px',
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontSize: size.toFixed(1) + 'px',
+          lineHeight: 1,
+          color: shade,
+          fontFamily: 'ui-monospace,SFMono-Regular,Menlo,monospace',
+        },
+        'aria-hidden': true,
+      }, glyphs[index])
+    }
+
+    /**
+     * The little preview line under the gradient controls.
+     *
+     * It draws from the pack's own pool instead of a hard-coded sentence, so
+     * the preview shows what that pack will actually say. Glyph packs also get
+     * the typewriter cadence and switch phrase every two seconds.
+     */
+    function PreviewLine({ lines, typing, gradient, mode, speed, gradientMode }) {
+      const [phrase, setPhrase] = React.useState('正在思考')
+      const [shown, setShown] = React.useState('正在思考')
+      const key = lines.join('\u0000')
+
+      React.useEffect(() => {
+        const pick = () => (lines.length === 0
+          ? '正在思考'
+          : lines[Math.floor(Math.random() * lines.length)])
+        setPhrase(pick())
+        if (!typing) return undefined
+        // 预览里 5 秒换一次词条，比真实那行慢，看着不吵
+        const timer = window.setInterval(() => setPhrase(pick()), 5000)
+        return () => window.clearInterval(timer)
+      }, [key, typing])
+
+      React.useEffect(() => {
+        if (!typing) {
+          setShown(phrase)
+          return undefined
+        }
+        let count = 0
+        setShown('')
+        const timer = window.setInterval(() => {
+          count += 1
+          setShown(phrase.slice(0, count))
+          if (count >= phrase.length) window.clearInterval(timer)
+        }, 90)
+        return () => window.clearInterval(timer)
+      }, [phrase, typing])
+
+      if (gradientMode === 'none') {
+        return h('span', { style: { fontWeight: 600 } }, shown)
+      }
+      return h('span', {
+        'data-ts-grad': '',
+        'data-ts-mode': gradientMode,
+        style: {
+          '--ts-gradient': mode === 'sweep'
+            ? sweepGradient(gradient[0], gradient.length > 1 ? gradient[1] : '#ffffff')
+            : mode === 'flow'
+              ? loopGradient(gradient)
+              : 'linear-gradient(90deg, ' + gradient.join(', ') + ')',
+          '--ts-flow-speed': speed + 's',
+          '--ts-base': gradient[0],
+          '--ts-shine': gradient.length > 1 ? gradient[1] : '#ffffff',
+          '--ts-sweep-speed': speed + 's',
+          fontWeight: 600,
+        },
+      }, shown)
+    }
+
     const previewOf = (lines) => (lines.length === 0 ? '（空）' : lines.slice(0, 5).join(' · ') + (lines.length > 5 ? ' …' : ''))
 
     /**
@@ -606,6 +942,10 @@ window.__ModuleLoader__.load({
       const [gradient, setGradient] = React.useState(DEFAULT_GRADIENT)
       const [gradientMode, setGradientMode] = React.useState('static')
       const [gradientSpeed, setGradientSpeed] = React.useState(3)
+      const [spinMode, setSpinMode] = React.useState('braille')
+      const [spinInterval, setSpinInterval] = React.useState(165)
+      const [spinPeriod, setSpinPeriod] = React.useState(2000)
+      const [spinColor, setSpinColor] = React.useState('#e5c07b')
       const [detail, setDetail] = React.useState(null)
       const [draft, setDraft] = React.useState('')
       const [note, setNote] = React.useState('')
@@ -638,6 +978,11 @@ window.__ModuleLoader__.load({
         setGradientSpeed(
           Number.isFinite(Number(appearance.speed)) ? Number(appearance.speed) : 3,
         )
+        const spinner = entry.spinner === undefined || entry.spinner === null ? {} : entry.spinner
+        setSpinMode(spinner.mode === 'glyph' ? 'glyph' : 'braille')
+        setSpinInterval(Number.isFinite(Number(spinner.interval)) ? Number(spinner.interval) : 165)
+        setSpinPeriod(Number.isFinite(Number(spinner.period)) ? Number(spinner.period) : 2000)
+        setSpinColor(typeof spinner.color === 'string' ? spinner.color : '')
         setDetail(null)
       }
 
@@ -706,6 +1051,18 @@ window.__ModuleLoader__.load({
             setNote(message)
           })
           .catch((error) => setNote('保存失败：' + error.message))
+      }
+
+      function saveSpinner() {
+        commit({
+          pack: selected,
+          spinner: {
+            mode: spinMode,
+            interval: spinInterval,
+            period: spinPeriod,
+            color: spinColor,
+          },
+        }, '字形已保存')
       }
 
       function saveGradient() {
@@ -1293,8 +1650,14 @@ window.__ModuleLoader__.load({
 
       // ---- list view ---------------------------------------------------------
 
+      const isSpinnerPack = current !== undefined
+        && current.spinner !== undefined
+        && current.spinner !== null
       const images = current === undefined || !Array.isArray(current.images) ? [] : current.images
       const generic = current === undefined ? [] : current.fallbackTexts || []
+      const previewLines = Array.from(new Set(
+        generic.concat(images.flatMap((img) => (Array.isArray(img.texts) ? img.texts : []))),
+      )).filter((line) => typeof line === 'string' && line.length > 0)
 
       return h('div', rootProps,
 
@@ -1356,6 +1719,82 @@ window.__ModuleLoader__.load({
             ),
           ),
         ),
+
+        // 字形包（没有图片，用字符转圈）
+        current !== undefined && current.spinner !== undefined && current.spinner !== null
+          ? h('div', null,
+            h('span', { style: S.label }, '字形（这一套用字符转圈，不用图片）'),
+            h('div', { style: S.row },
+              h('span', { style: S.hint }, '模式'),
+              [['braille', '盲文'], ['glyph', '字符画']].map(([id, text]) => h('button', {
+                key: 'spin-' + id,
+                type: 'button',
+                className: 'ts-btn',
+                style: {
+                  ...S.btn,
+                  padding: '4px 10px',
+                  ...(spinMode === id ? { borderColor: '#4c8bf5', background: 'rgba(76,139,245,.16)' } : null),
+                },
+                onClick: () => setSpinMode(id),
+              }, text)),
+              h('span', { style: S.hint }, spinMode === 'glyph' ? '整趟时长' : '帧间隔'),
+              h('input', {
+                type: 'number',
+                min: 16,
+                max: 6000,
+                step: 10,
+                value: spinMode === 'glyph' ? spinPeriod : spinInterval,
+                style: { ...S.field, width: '76px', padding: '4px 6px' },
+                onChange: (event) => {
+                  const value = Number(event.target.value)
+                  if (!Number.isFinite(value)) return
+                  const clamped = Math.max(16, Math.min(6000, Math.round(value)))
+                  if (spinMode === 'glyph') setSpinPeriod(clamped)
+                  else setSpinInterval(clamped)
+                },
+              }),
+              h('span', { style: S.hint }, 'ms'),
+              h('span', { style: S.hint }, '颜色'),
+              h('input', {
+                type: 'color',
+                value: spinColor === '' ? '#e5c07b' : spinColor,
+                onChange: (event) => setSpinColor(event.target.value),
+              }),
+              h('button', {
+                type: 'button',
+                className: 'ts-btn',
+                style: { ...S.btn, fontSize: '12px', padding: '4px 10px' },
+                title: '去掉固定色，让字形跟着主题走',
+                onClick: () => setSpinColor(''),
+              }, '用主题色'),
+              h('button', {
+                type: 'button',
+                className: 'ts-btn',
+                style: S.btn,
+                onClick: saveSpinner,
+              }, '保存'),
+            ),
+            h('div', { style: { ...S.row, marginTop: '10px' } },
+              h('span', { style: S.hint }, '预览'),
+              h(SpinPreview, {
+                mode: spinMode,
+                interval: spinMode === 'glyph' ? spinPeriod : spinInterval,
+                color: spinColor,
+              }),
+              h(PreviewLine, {
+                lines: previewLines,
+                typing: true,
+                gradient: gradient,
+                mode: gradientMode,
+                speed: gradientSpeed,
+                gradientMode: gradientMode,
+              }),
+            ),
+            h('div', { style: { marginTop: '6px', fontSize: '12px', opacity: 0.55 } },
+              '盲文：⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ 单向转圈，时长＝每帧毫秒（官方 80）。'
+              + '字符画：· ✢ ✻ 余弦呼吸，时长＝一整趟毫秒（官方 2000）。两个值各存各的。'),
+          )
+          : null,
 
         // gradient
         h('div', null,
@@ -1426,31 +1865,25 @@ window.__ModuleLoader__.load({
             + '切回流动/静态才用得上。'),
           h('div', { style: { ...S.row, marginTop: '10px' } },
             h('span', { style: S.hint }, '预览'),
-            gradientMode === 'none'
-              ? h('span', { style: { fontWeight: 600 } }, '正在思考，用时 3秒')
-              : h('span', {
-                'data-ts-grad': '',
-                'data-ts-mode': gradientMode,
-                style: {
-                  '--ts-gradient': gradientMode === 'sweep'
-                    ? sweepGradient(gradient[0], gradient.length > 1 ? gradient[1] : '#ffffff')
-                    : gradientMode === 'flow'
-                      ? loopGradient(gradient)
-                      : 'linear-gradient(90deg, ' + gradient.join(', ') + ')',
-                  '--ts-flow-speed': gradientSpeed + 's',
-                  '--ts-base': gradient[0],
-                  '--ts-shine': gradient.length > 1 ? gradient[1] : '#ffffff',
-                  '--ts-sweep-speed': gradientSpeed + 's',
-                  fontWeight: 600,
-                },
-              }, '正在思考，用时 3秒'),
+            h(PreviewLine, {
+              lines: previewLines,
+              typing: isSpinnerPack,
+              gradient: gradient,
+              mode: gradientMode,
+              speed: gradientSpeed,
+              gradientMode: gradientMode,
+            }),
           ),
         ),
 
         // phrase pools
         h('div', null,
           h('span', { style: S.label }, '文案池'),
-          h('div', { style: S.poolList },
+          h('div', {
+            style: isSpinnerPack
+              ? { ...S.poolList, aspectRatio: 'auto', overflowY: 'visible' }
+              : S.poolList,
+          },
             h('div', {
               className: 'ts-row',
               style: S.poolRow,
@@ -1471,7 +1904,9 @@ window.__ModuleLoader__.load({
               h('div', { style: S.poolPreview }, '通用 · ' + previewOf(generic)),
               h('span', { style: S.poolCount }, generic.length + ' 句'),
             ),
-            images.map((image) => h('div', {
+            (current !== undefined && current.spinner !== undefined && current.spinner !== null
+              ? []
+              : images).map((image) => h('div', {
               key: image.id,
               className: 'ts-row',
               style: S.poolRow,
@@ -1487,11 +1922,15 @@ window.__ModuleLoader__.load({
             )),
           ),
           h('span', { style: { ...S.hint, display: 'block', marginTop: '6px' } },
-            images.length + ' 张图 · 点任意一行进去改文案'),
+            current !== undefined && current.spinner !== undefined && current.spinner !== null
+              ? '这一套用字符转圈，没有图片池；文案全部来自上面的通用池。'
+              : images.length + ' 张图 · 点任意一行进去改文案'),
         ),
 
-        // import
-        h('div', null,
+        // import（字形包不需要）
+        current !== undefined && current.spinner !== undefined && current.spinner !== null
+          ? null
+          : h('div', null,
           h('span', { style: S.label }, '导入图片到「' + (selected === '' ? '未选择' : selected) + '」'),
           h('div', { style: S.row },
             h(FilePick, {
@@ -1573,9 +2012,25 @@ window.__ModuleLoader__.load({
           const interval = setInterval(() => {
             paint(document)
           }, 1000)
+          // 字形每 80ms 一帧，1 秒的节拍会让它一顿一顿地跳，所以单独给一条快节拍。
+          // 只改文字和颜色，不做查询以外的重活。
+          const fast = setInterval(() => {
+            tickSpinners(document)
+            tickGlimmer(document, Date.now())
+            // 有词条还没打完就重画一次（打完就不再触发，避免每秒白跑）
+            for (const row of document.querySelectorAll(ROW)) {
+              const full = row.getAttribute('data-ts-full')
+              const shown = row.getAttribute('data-ts-shown') || ''
+              if (full !== null && shown.length < full.length) {
+                paint(document)
+                break
+              }
+            }
+          }, 80)
           return () => {
             observer.disconnect()
             clearInterval(interval)
+            clearInterval(fast)
           }
         })
       },

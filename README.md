@@ -16,7 +16,11 @@ more than the answer. This replaces its icon and its copy, and keeps the timer.
 文案      每次「思考」随机抽一句，从这张图自己的池子里抽
 轮换      同一轮里每 7–15 秒换一句，图不变
 渐变      2–4 色渐变，四种模式：无 / 静态 / 流动 / 扫光，周期可调
-设置      设置 → 思考状态：套组卡片、每图独立文案池、导入图片/文件夹
+亮带      一条 3 字符宽的白色高光扫过文字，和打字同速
+打字      词条逐字出现（90ms/字），打完停住，等下次换词
+字形套    没有图片的套用字符转圈：盲文 ⠋⠙⠹… 或字符画 · ✢ ✻ 呼吸
+设置      设置 → 思考状态：套组卡片、每图独立文案池、导入图片/文件夹、
+          导出/导入 .zip、字形参数与实时预览
 ```
 
 **双随机：** 一次运行抽一张图（整轮固定），图再带自己的文案池，池里每 7–15 秒抽一句。
@@ -81,16 +85,22 @@ python tools/import-pack.py --claudecode     # placeholder + the 179 verbs
 |---|---|---|
 | 蓝色大肥鱼 | 39 | Blue Fat Fish stickers, 128×128 |
 | 酒狐 | 1 | One fox sticker, 128×128 |
-| Claude Code | 1 | A placeholder ✻; its 179 real spinner verbs are the pool |
+| Claude Code | 1 | 盲文/字符画转圈 + 184 个真动词（从 claude.exe 2.1.328 提取） |
 
 **帧率不统一——每个包保留源文件自己的节奏**：鱼是 20 ms 一帧，狐狸是 100 ms 一帧。
 强行统一帧率是曾经的 bug：狐狸转快一倍，鱼丢掉三分之二的帧。见
 [tools/compile-pack.py](tools/compile-pack.py)。
 
-**The Claude Code pack is a placeholder on purpose.** Claude Code's spinner is not an image:
-it cycles `· ✢ * ✶ ✻ ✽` as terminal text, 2 s per frame, forward then back, blending the colour
-toward `rgb(171,43,63)`. Reproducing that needs a text mode, not a GIF. Everything measured from
-its binary is recorded in [assets/ClaudeCode/FINDINGS.md](assets/ClaudeCode/FINDINGS.md).
+**The Claude Code pack is a text-mode pack, not an image pack.** Claude Code ships two spinners:
+
+| | frames | timing | colour |
+|---|---|---|---|
+| 盲文 | `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` | 80 ms per frame | yellow |
+| 字符画 | `· ✢ ✻` (ours; the binary uses `· ✢ * ✶ ✻ ✽`) | one breath per 2000 ms, `(1-cos)/2` | theme, or a fixed colour |
+
+Both are selectable in the panel, with separate durations — the braille interval is milliseconds
+per frame, while the glyph value is milliseconds per whole breath. Everything measured from the
+binary is recorded in [assets/ClaudeCode/FINDINGS.md](assets/ClaudeCode/FINDINGS.md).
 
 ---
 

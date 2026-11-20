@@ -361,6 +361,30 @@ export function apply(ctx) {
           if (Number.isFinite(speed) && speed >= 1 && speed <= 60) {
             target.appearance = { ...(target.appearance || {}), speed }
           }
+          // 字形包的旋转参数：模式 / 帧间隔 / 颜色（空 = 跟主题）
+          if (patch.spinner !== undefined && patch.spinner !== null && typeof patch.spinner === 'object') {
+            const next = { ...(target.spinner || {}) }
+            if (patch.spinner.mode === 'braille' || patch.spinner.mode === 'glyph') {
+              next.mode = patch.spinner.mode
+            }
+            const interval = Number(patch.spinner.interval)
+            if (Number.isFinite(interval) && interval >= 16 && interval <= 6000) {
+              next.interval = Math.round(interval)
+            }
+            // 字符画的一整趟时长，和盲文的帧间隔分开存
+            const period = Number(patch.spinner.period)
+            if (Number.isFinite(period) && period >= 200 && period <= 6000) {
+              next.period = Math.round(period)
+            }
+            if (typeof patch.spinner.color === 'string') {
+              if (patch.spinner.color === '') delete next.color
+              else if (/^#[0-9a-f]{3,8}$/i.test(patch.spinner.color)) next.color = patch.spinner.color
+            }
+            if (Array.isArray(patch.spinner.frames) && patch.spinner.frames.length > 1) {
+              next.frames = patch.spinner.frames.filter((f) => typeof f === 'string' && f.length > 0)
+            }
+            target.spinner = next
+          }
           const fallback = cleanLines(patch.fallbackTexts)
           if (fallback !== null) target.fallbackTexts = fallback
           if (typeof patch.cover === 'string' && patch.cover.length > 0) target.cover = patch.cover
@@ -581,6 +605,7 @@ export function apply(ctx) {
             name: pack.name,
             appearance: pack.appearance || {},
             fallbackTexts: Array.isArray(pack.fallbackTexts) ? pack.fallbackTexts : [],
+            spinner: pack.spinner === undefined ? null : pack.spinner,
             cover: (images.find((i) => i.sourceFile === pack.cover) || images[0] || {}).file || null,
             images,
           },
@@ -744,6 +769,9 @@ export function apply(ctx) {
           appearance: source.appearance !== null && typeof source.appearance === 'object'
             ? source.appearance
             : {},
+          spinner: source.spinner !== null && typeof source.spinner === 'object'
+            ? source.spinner
+            : null,
           images: stored,
         })
         if (!data.active) data.active = id
