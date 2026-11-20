@@ -226,6 +226,11 @@ export function apply(ctx) {
           if (MODES.includes(patch.mode)) {
             target.appearance = { ...(target.appearance || {}), mode: patch.mode }
           }
+          // 循环一圈的秒数：小于 1 秒看着像抽搐，大于 60 秒等于不动
+          const speed = Number(patch.speed)
+          if (Number.isFinite(speed) && speed >= 1 && speed <= 60) {
+            target.appearance = { ...(target.appearance || {}), speed }
+          }
           const fallback = cleanLines(patch.fallbackTexts)
           if (fallback !== null) target.fallbackTexts = fallback
           if (typeof patch.cover === 'string' && patch.cover.length > 0) target.cover = patch.cover

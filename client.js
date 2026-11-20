@@ -67,27 +67,26 @@ window.__ModuleLoader__.load({
       'color: transparent;',
       '-webkit-text-fill-color: transparent;',
       '}',
-      // 流动：把渐变拉长到 3 倍，再让 background-position 平移，形成循环流光
+      // 流动：图案本身首尾同色（见 loopGradient），位移正好一个图案周期
+      // → 循环处无缝，不会突然快一下
       '[', GRAD_ATTR, '][data-ts-mode="flow"] {',
-      'background-size: 300% 100%;',
-      'animation: ts-flow var(--ts-flow-speed, 5s) linear infinite;',
+      'background-size: 200% 100%;',
+      'animation: ts-flow var(--ts-flow-speed, 3s) linear infinite;',
       '}',
       '@keyframes ts-flow {',
-      'from { background-position: 0% 50%; }',
-      'to { background-position: 300% 50%; }',
+      'from { background-position-x: 0%; }',
+      'to { background-position-x: -200%; }',
       '}',
-      // 扫光：底色铺满，中间夹一条窄高光，整条带子横移
+
+      // 扫光：图案宽 3 倍，高光只占中间一小段，剩下三分之二是安静底色
+      // 位移 = 一个图案周期（3 格位移 → 百分比 -150%），循环处同样无缝
       '[', GRAD_ATTR, '][data-ts-mode="sweep"] {',
-      'background-image: linear-gradient(100deg,',
-      '  var(--ts-base) 0%, var(--ts-base) 38%,',
-      '  var(--ts-shine) 50%,',
-      '  var(--ts-base) 62%, var(--ts-base) 100%);',
-      'background-size: 220% 100%;',
+      'background-size: 300% 100%;',
       'animation: ts-sweep var(--ts-sweep-speed, 3s) linear infinite;',
       '}',
       '@keyframes ts-sweep {',
-      'from { background-position: 220% 50%; }',
-      'to { background-position: -120% 50%; }',
+      'from { background-position-x: 0%; }',
+      'to { background-position-x: -150%; }',
       '}',
       '.ts-card:hover { background: rgba(127,127,127,.13); }',
       // 鼠标点击不给焦点圈（它和"选中"撞车）；键盘 Tab 过来才显示
@@ -316,7 +315,16 @@ window.__ModuleLoader__.load({
         ? appearance.gradient
         : null
       const usable = colors !== null && colors.length >= 2 && mode !== 'none'
-      const gradient = usable ? 'linear-gradient(90deg, ' + colors.join(', ') + ')' : ''
+      let gradient = ''
+      if (usable) {
+        if (mode === 'sweep') {
+          gradient = sweepGradient(colors[0], colors.length > 1 ? colors[1] : '#ffffff')
+        } else if (mode === 'flow') {
+          gradient = loopGradient(colors)
+        } else {
+          gradient = 'linear-gradient(90deg, ' + colors.join(', ') + ')'
+        }
+      }
       for (const element of targets) {
         if (!usable) {
           if (element.hasAttribute(GRAD_ATTR)) {
@@ -331,10 +339,13 @@ window.__ModuleLoader__.load({
         element.setAttribute(GRAD_ATTR, '')
         element.setAttribute('data-ts-mode', mode)
         element.style.setProperty('--ts-gradient', gradient)
-        element.style.setProperty('--ts-flow-speed', '5s')
+        const seconds = appearance !== undefined && Number.isFinite(Number(appearance.speed))
+          ? Math.max(1, Math.min(60, Number(appearance.speed)))
+          : 3
+        element.style.setProperty('--ts-flow-speed', seconds + 's')
         element.style.setProperty('--ts-base', colors[0])
         element.style.setProperty('--ts-shine', colors.length > 1 ? colors[1] : '#ffffff')
-        element.style.setProperty('--ts-sweep-speed', '3s')
+        element.style.setProperty('--ts-sweep-speed', seconds + 's')
       }
     }
 
@@ -510,6 +521,77 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** Parse #rgb / #rrggbb into [r,g,b], or null. */
+    function parseHex(hex) {
+      let body = String(hex).replace('#', '')
+      if (body.length === 3) body = body.split('').map((c) => c + c).join('')
+      if (!/^[0-9a-f]{6}$/i.test(body)) return null
+      return [0, 2, 4].map((i) => parseInt(body.slice(i, i + 2), 16))
+    }
+
+    /** Blend two hex colors, t=0 gives a, t=1 gives b. */
+    function mixHex(a, b, t) {
+      const one = parseHex(a)
+      const two = parseHex(b)
+      if (one === null || two === null) return a
+      return '#' + one
+        .map((v, i) => Math.round(v + (two[i] - v) * t).toString(16).padStart(2, '0'))
+        .join('')
+    }
+
+    /**
+     * A gradient that tiles seamlessly.
+     *
+     * A plain linear-gradient(a, b) ends on b and starts on a, so the next tile
+     * puts b beside a: a visible hard seam every tile width. Mirroring the
+     * sequence gives both edges the same color.
+     */
+    function loopGradient(colors) {
+      const seq = colors.concat(colors.slice(0, -1).reverse())
+      const segments = seq.length - 1
+      const span = 100 / segments
+      // 线性插值在浅色一侧显得"一下就过去"。每段插 6 个子色标，用 smoothstep
+      // 缓入缓出，两端慢、中间快，过渡才看起来是晕开的。
+      const SUB = 6
+      const stops = []
+      for (let segment = 0; segment < segments; segment += 1) {
+        const from = seq[segment]
+        const to = seq[segment + 1]
+        const start = segment * span
+        for (let k = 0; k < SUB; k += 1) {
+          const t = k / SUB
+          const eased = t * t * (3 - 2 * t)
+          stops.push([start + span * t, mixHex(from, to, eased)])
+        }
+      }
+      stops.push([100, seq[seq.length - 1]])
+      return 'linear-gradient(90deg, '
+        + stops.map(([at, color]) => color + ' ' + at.toFixed(2) + '%').join(', ')
+        + ')'
+    }
+
+    /**
+     * Base color with one soft shine band, the rest flat.
+     *
+     * Five interpolated stops per side instead of two is what makes the light
+     * bloom rather than arrive as a hard stripe; the flat two thirds are what
+     * make a pass read as an event instead of a conveyor belt.
+     */
+    function sweepGradient(base, shine) {
+      const stops = [
+        [0, base], [40, base],
+        [43, mixHex(base, shine, 0.20)],
+        [46, mixHex(base, shine, 0.58)],
+        [50, shine],
+        [54, mixHex(base, shine, 0.58)],
+        [57, mixHex(base, shine, 0.20)],
+        [60, base], [100, base],
+      ]
+      return 'linear-gradient(100deg, '
+        + stops.map(([at, color]) => color + ' ' + at + '%').join(', ')
+        + ')'
+    }
+
     const previewOf = (lines) => (lines.length === 0 ? '（空）' : lines.slice(0, 5).join(' · ') + (lines.length > 5 ? ' …' : ''))
 
     /**
@@ -523,6 +605,7 @@ window.__ModuleLoader__.load({
       const [selected, setSelected] = React.useState('')
       const [gradient, setGradient] = React.useState(DEFAULT_GRADIENT)
       const [gradientMode, setGradientMode] = React.useState('static')
+      const [gradientSpeed, setGradientSpeed] = React.useState(3)
       const [detail, setDetail] = React.useState(null)
       const [draft, setDraft] = React.useState('')
       const [note, setNote] = React.useState('')
@@ -546,6 +629,9 @@ window.__ModuleLoader__.load({
         setGradient(colors.length >= 2 ? colors.slice(0, 4) : DEFAULT_GRADIENT)
         setGradientMode(
           ['none', 'flow', 'sweep'].includes(appearance.mode) ? appearance.mode : 'static',
+        )
+        setGradientSpeed(
+          Number.isFinite(Number(appearance.speed)) ? Number(appearance.speed) : 3,
         )
         setDetail(null)
       }
@@ -618,7 +704,7 @@ window.__ModuleLoader__.load({
       }
 
       function saveGradient() {
-        commit({ pack: selected, gradient, mode: gradientMode, active: selected }, '已保存')
+        commit({ pack: selected, gradient, mode: gradientMode, speed: gradientSpeed, active: selected }, '已保存')
       }
 
       function switchPack(id) {
@@ -933,7 +1019,7 @@ window.__ModuleLoader__.load({
 
         // gradient
         h('div', null,
-          h('span', { style: S.label }, '文字渐变（2–4 色；扫光模式只用前两色：底 → 高光）'),
+          h('span', { style: S.label }, '文字渐变（2–4 色）'),
           h('div', { style: S.row },
             gradient.map((color, index) => h('input', {
               key: 'c' + index,
@@ -977,8 +1063,27 @@ window.__ModuleLoader__.load({
               },
               onClick: () => setGradientMode(id),
             }, text)),
+            h('span', { style: { ...S.hint, marginLeft: '4px' } }, '一圈'),
+            h('input', {
+              type: 'number',
+              min: 1,
+              max: 60,
+              step: 1,
+              value: gradientSpeed,
+              style: { ...S.field, width: '58px', padding: '4px 6px' },
+              onChange: (event) => {
+                const value = Number(event.target.value)
+                if (Number.isFinite(value)) {
+                  setGradientSpeed(Math.max(1, Math.min(60, Math.round(value))))
+                }
+              },
+            }),
+            h('span', { style: S.hint }, '秒'),
             h('button', { type: 'button', className: 'ts-btn', style: S.btn, onClick: saveGradient }, '保存'),
           ),
+          h('div', { style: { marginTop: '6px', fontSize: '12px', opacity: 0.55 } },
+            '扫光只用前两个颜色：第一个是字的底色，第二个是高光。第 3、4 个颜色在扫光模式下不参与，'
+            + '切回流动/静态才用得上。'),
           h('div', { style: { ...S.row, marginTop: '10px' } },
             h('span', { style: S.hint }, '预览'),
             gradientMode === 'none'
@@ -987,11 +1092,15 @@ window.__ModuleLoader__.load({
                 'data-ts-grad': '',
                 'data-ts-mode': gradientMode,
                 style: {
-                  '--ts-gradient': 'linear-gradient(90deg, ' + gradient.join(', ') + ')',
-                  '--ts-flow-speed': '5s',
+                  '--ts-gradient': gradientMode === 'sweep'
+                    ? sweepGradient(gradient[0], gradient.length > 1 ? gradient[1] : '#ffffff')
+                    : gradientMode === 'flow'
+                      ? loopGradient(gradient)
+                      : 'linear-gradient(90deg, ' + gradient.join(', ') + ')',
+                  '--ts-flow-speed': gradientSpeed + 's',
                   '--ts-base': gradient[0],
                   '--ts-shine': gradient.length > 1 ? gradient[1] : '#ffffff',
-                  '--ts-sweep-speed': '3s',
+                  '--ts-sweep-speed': gradientSpeed + 's',
                   fontWeight: 600,
                 },
               }, '正在思考，用时 3秒'),
