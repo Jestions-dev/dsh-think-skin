@@ -1975,6 +1975,40 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /**
+     * The nav icon for our settings section.
+     *
+     * `settings.section.icon` hands the component `size` (requested square edge)
+     * and `active` (whether the section is selected). We show the active pack's
+     * cover; glyph packs get a star instead, since they have no artwork.
+     */
+    function SettingsIcon({ size, active }) {
+      const [, bump] = React.useState(0)
+      React.useEffect(() => {
+        if (pack === null) loadPack().then(() => bump((n) => n + 1))
+      }, [])
+      const edge = Number.isFinite(Number(size)) ? Number(size) : 16
+      const box = { width: edge + 'px', height: edge + 'px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }
+
+      if (pack === null) return h('span', { style: { ...box, fontSize: edge * 0.9 } }, '✻')
+      // 字形套也有封面（那个橙色 ✻ 占位图），照样用它，别退化成文字
+      const file = pack.cover || (Array.isArray(pack.images) && pack.images[0] !== undefined
+        ? pack.images[0].file
+        : null)
+      if (file === null) return h('span', { style: { ...box, fontSize: edge * 0.9 } }, '✻')
+      return h('img', {
+        src: imageUrl(file),
+        alt: '',
+        style: {
+          width: edge + 'px',
+          height: edge + 'px',
+          objectFit: 'contain',
+          borderRadius: '3px',
+          opacity: active === false ? 0.85 : 1,
+        },
+      })
+    }
+
     /** Register the settings page. Failure here must not take the skin down. */
     function registerSettings(ctx) {
       try {
@@ -1985,6 +2019,15 @@ window.__ModuleLoader__.load({
           label: () => '思考状态',
           inject: () => ({}),
         }, SettingsPanel))
+
+        // 同一个 id 才会被挂到我们那一行的图标位上
+        ctx.slots.inject('settings.section.icon', () => ctx.slots.register({
+          name: 'settings.section.icon',
+          id: 'think-skin',
+          order: 40,
+          label: () => '思考状态',
+          inject: () => ({}),
+        }, SettingsIcon))
       } catch {
         /* the panel is optional; the skin keeps working without it */
       }

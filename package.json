@@ -1,6 +1,6 @@
 {
   "name": "dsh-think-skin",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Reskin the DSH thinking row: your own image, your own words, double random.",
   "type": "module",
   "license": "MIT",
