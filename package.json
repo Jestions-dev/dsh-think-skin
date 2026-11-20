@@ -1,6 +1,6 @@
 {
   "name": "dsh-think-skin",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Reskin the DSH thinking row: your own image, your own words, double random.",
   "type": "module",
   "license": "MIT",
@@ -21,9 +21,13 @@
   ],
   "exports": {
     ".": "./index.js",
-    "./client": "./client.js"
+    "./client": "./client.js",
+    "./icon": "./icon.png"
   },
   "files": [
+    "icon.png",
+    "assets/icon.png",
+    "assets/icon.gif",
     "index.js",
     "client.js",
     "cordis.patch.yml",
@@ -48,5 +52,6 @@
   },
   "scripts": {
     "check": "node --check index.js && node --check client.js"
-  }
+  },
+  "icon": "./icon.png"
 }
