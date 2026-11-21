@@ -7,6 +7,8 @@ more than the answer. This replaces its icon and its copy, and keeps the timer.
 
 ![The row, reskinned](assets/cover.gif)
 
+▶ **[宣传片 · B 站](https://www.bilibili.com/video/BV1Layaz2Em7)** （1 分 45 秒，三套皮肤 + 安装全过程）
+
 ---
 
 ## What it does
@@ -35,6 +37,8 @@ more than the answer. This replaces its icon and its copy, and keeps the timer.
 
 ```bash
 dsh plugin add github:Jestions-dev/dsh-think-skin
+# 或从 npm：
+dsh plugin add dsh-think-skin
 ```
 
 Then restart DSH once.
