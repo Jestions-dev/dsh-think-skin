@@ -620,15 +620,15 @@ window.__ModuleLoader__.load({
     const Music = (() => {
       let audio = null
       let master = null
-      let gain = null
-      let source = null
-      let playing = null
-      let active = false
+      let playing = null        // 正在放的曲目 id
+      let active = false        // 思考行是否在
+      let starting = false      // 有一次 play 还在 await，期间不许再起
       let pool = []
       let poolKey = ''
       let bag = []
       let token = 0
       let idleTimer = 0
+      const live = new Set()    // 所有没停掉的音源：万一有漏网的，也一定能一起叫停
       const cache = new Map()
 
       function ensure() {
@@ -642,6 +642,7 @@ window.__ModuleLoader__.load({
           master.connect(audio.destination)
         } catch {
           audio = null
+          master = null
         }
         return audio
       }
@@ -652,7 +653,6 @@ window.__ModuleLoader__.load({
         return Math.pow(v / 100, 1.7) * 0.9
       }
 
-      /** 浏览器要求有用户手势才出声：第一次交互解锁一次就够。 */
       function unlock() {
         const ac = ensure()
         if (ac === null) return Promise.resolve()
@@ -672,7 +672,7 @@ window.__ModuleLoader__.load({
       function idle() {
         clearTimeout(idleTimer)
         idleTimer = setTimeout(() => {
-          if (audio !== null && playing === null && audio.state === 'running') {
+          if (audio !== null && playing === null && live.size === 0 && audio.state === 'running') {
             audio.suspend().catch(() => {})
           }
         }, 20000)
@@ -713,115 +713,152 @@ window.__ModuleLoader__.load({
         return bag.shift() || null
       }
 
-      function cut(ms) {
-        if (gain === null || audio === null) return
-        const now = audio.currentTime
-        try {
-          gain.gain.cancelScheduledValues(now)
-          gain.gain.setValueAtTime(gain.gain.value, now)
-          gain.gain.linearRampToValueAtTime(0.0001, now + ms / 1000)
-        } catch {
-          /* 节点可能已经断开 */
-        }
-      }
-
-      function silence() {
-        if (source !== null) {
+      /** 停掉每一路音源（可带淡出），并把它们从活音源集合里清掉。 */
+      function killAll(fadeMs) {
+        const dying = Array.from(live)
+        live.clear()
+        for (const node of dying) {
           try {
-            source.stop()
+            if (fadeMs > 0) {
+              const now = audio === null ? 0 : audio.currentTime
+              node.gain.gain.cancelScheduledValues(now)
+              node.gain.gain.setValueAtTime(node.gain.gain.value, now)
+              node.gain.gain.linearRampToValueAtTime(0.0001, now + fadeMs / 1000)
+            }
           } catch {
-            /* 已经停了 */
+            /* 节点可能已经断了 */
           }
-          source = null
         }
-        if (gain !== null) {
-          try {
-            gain.disconnect()
-          } catch {
-            /* 同上 */
-          }
-          gain = null
-        }
-        playing = null
-      }
-
-      async function play(track, fadeIn) {
-        const ac = ensure()
-        if (ac === null) return
-        const mine = ++token
-        const data = await bytes(track.file)
-        if (mine !== token) return
-        if (data === null) {
-          next()
-          return
-        }
-        let buffer
-        try {
-          buffer = await ac.decodeAudioData(data.slice(0))
-        } catch {
-          next()
-          return
-        }
-        if (mine !== token) return
-        await unlock()
-        if (mine !== token) return
-
-        silence()
-        playing = track.id
-        gain = ac.createGain()
-        gain.gain.value = 0.0001
-        gain.connect(master)
-        source = ac.createBufferSource()
-        source.buffer = buffer
-        source.connect(gain)
-        const started = ac.currentTime
-        const fade = Math.min(0.25, buffer.duration / 4)
-        try {
-          gain.gain.setValueAtTime(0.0001, started)
-          gain.gain.linearRampToValueAtTime(1, started + (fadeIn ? fade : 0.02))
-        } catch {
-          /* 极短的文件可能排不进两个事件 */
-        }
-        const tail = Math.max(0, buffer.duration - Math.min(0.3, buffer.duration / 4))
-        source.onended = () => {
-          if (mine !== token) return
-          source = null
-          gain = null
-          playing = null
-          if (active) setTimeout(() => next(), 120)
-          else idle()
-        }
-        try {
-          source.start(0)
-        } catch {
-          next()
-          return
-        }
+        const wait = fadeMs > 0 ? fadeMs + 60 : 0
         setTimeout(() => {
-          if (mine === token) cut(260)
-        }, Math.max(200, tail * 1000))
-      }
-
-      function next() {
-        if (!active) return
-        const track = pick()
-        if (track === null) return
-        play(track, true)
+          for (const node of dying) {
+            try {
+              node.source.onended = null
+              node.source.stop()
+            } catch {
+              /* 已经停了 */
+            }
+            try {
+              node.source.disconnect()
+              node.gain.disconnect()
+            } catch {
+              /* 同上 */
+            }
+          }
+        }, wait)
+        playing = null
       }
 
       function stop() {
         token += 1
-        if (playing !== null) {
-          cut(300)
-          const dying = source
-          setTimeout(() => {
-            if (source === dying) silence()
-          }, 320)
-        }
+        starting = false
+        if (playing !== null || live.size > 0) killAll(300)
         idle()
       }
 
-      /** 思考行在不在、用哪个池，都从这里进。 */
+      async function play(track) {
+        const ac = ensure()
+        if (ac === null) return
+        const mine = ++token
+        starting = true
+        const data = await bytes(track.file)
+        if (mine !== token) {
+          starting = false
+          return
+        }
+        if (data === null) {
+          starting = false
+          if (active) setTimeout(() => next(), 400)
+          return
+        }
+        let buffer = null
+        try {
+          buffer = await ac.decodeAudioData(data.slice(0))
+        } catch {
+          buffer = null
+        }
+        if (mine !== token) {
+          starting = false
+          return
+        }
+        if (buffer === null) {
+          starting = false
+          if (active) setTimeout(() => next(), 400)
+          return
+        }
+        await unlock()
+        if (mine !== token) {
+          starting = false
+          return
+        }
+
+        // 到这里才真正开声音：先清掉可能残留的其它音源，保证同时只有一路
+        killAll(0)
+        const gain = ac.createGain()
+        const source = ac.createBufferSource()
+        source.buffer = buffer
+        gain.gain.value = 0.0001
+        source.connect(gain)
+        gain.connect(master)
+        const node = { source, gain }
+        live.add(node)
+        playing = track.id
+
+        const started = ac.currentTime
+        const fade = Math.min(0.25, buffer.duration / 4)
+        try {
+          gain.gain.setValueAtTime(0.0001, started)
+          gain.gain.linearRampToValueAtTime(1, started + fade)
+        } catch {
+          gain.gain.value = 1
+        }
+
+        source.onended = () => {
+          live.delete(node)
+          try {
+            source.disconnect()
+            gain.disconnect()
+          } catch {
+            /* 已经断了 */
+          }
+          if (playing === track.id) playing = null
+          if (mine !== token) return
+          if (active) setTimeout(() => next(), 120)
+          else idle()
+        }
+
+        try {
+          source.start(0)
+        } catch {
+          live.delete(node)
+          playing = null
+          starting = false
+          return
+        }
+        starting = false
+
+        // 结尾先淡出，别硬切
+        const tail = Math.max(0, buffer.duration - Math.min(0.3, buffer.duration / 4))
+        setTimeout(() => {
+          if (mine !== token || !live.has(node)) return
+          try {
+            const now = ac.currentTime
+            gain.gain.cancelScheduledValues(now)
+            gain.gain.setValueAtTime(gain.gain.value, now)
+            gain.gain.linearRampToValueAtTime(0.0001, now + 0.26)
+          } catch {
+            /* 已经结束 */
+          }
+        }, Math.max(200, tail * 1000))
+      }
+
+      function next() {
+        if (!active || starting || playing !== null || live.size > 0) return
+        const track = pick()
+        if (track === null) return
+        play(track)
+      }
+
       function sync(want, list) {
         const enabled = docSettings.musicEnabled !== false
         const key = list.map((t) => t.id).join('|')
@@ -833,25 +870,49 @@ window.__ModuleLoader__.load({
         pool = list
         const should = want && enabled && list.length > 0
         if (!should) {
-          if (active) stop()
-          active = false
+          if (active) {
+            active = false
+            stop()
+          }
           return
         }
         active = true
-        if (playing === null) next()
+        if (playing === null && !starting && live.size === 0) next()
       }
 
-      function applyVolume() {
-        if (master !== null && audio !== null) {
-          try {
-            master.gain.setTargetAtTime(volumeGain(), audio.currentTime, 0.05)
-          } catch {
-            master.gain.value = volumeGain()
-          }
+      /** 巡检：paint 有可能漏掉「行没了」这一帧，这里兜住。 */
+      function tick(hasRow) {
+        if (!hasRow && active) {
+          active = false
+          stop()
         }
       }
 
-      return { sync, applyVolume, unlock, stop }
+      function applyVolume() {
+        if (master === null || audio === null) return
+        const target = volumeGain()
+        try {
+          const now = audio.currentTime
+          // 取消排队中的自动化再线性过渡 80ms：拖滑轨时是立刻听出来的
+          master.gain.cancelScheduledValues(now)
+          master.gain.setValueAtTime(master.gain.value, now)
+          master.gain.linearRampToValueAtTime(target, now + 0.08)
+        } catch {
+          master.gain.value = target
+        }
+      }
+
+      function previewVolume(value) {
+        const n = Number(value)
+        if (!Number.isFinite(n)) return
+        docSettings = {
+          musicEnabled: docSettings.musicEnabled,
+          musicVolume: Math.max(0, Math.min(100, Math.round(n))),
+        }
+        applyVolume()
+      }
+
+      return { sync, tick, applyVolume, previewVolume, unlock, stop }
     })()
     function paint(root) {
       if (pack === null) {
@@ -1710,33 +1771,62 @@ window.__ModuleLoader__.load({
         }
       }
 
+      // 一个框装一整池：内容多就往下长，长到 220px 之后自己滚
+      const box = {
+        border: '1px solid rgba(127,127,127,.28)',
+        borderRadius: '10px',
+        background: 'rgba(127,127,127,.05)',
+        overflow: 'hidden',
+      }
+
       return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } },
         h('div', { style: S.row },
           h(FilePick, { label: '导入音乐', multiple: true, accept: 'audio/*', onFiles: add }),
-          h('span', { style: S.hint }, tracks.length === 0 ? '还没有音乐' : tracks.length + ' 首'),
+          h('span', { style: S.hint }, tracks.length === 0 ? '空池' : tracks.length + ' 首'),
           busy === '' ? null : h('span', { style: S.hint }, busy),
         ),
-        tracks.length === 0
-          ? h('div', { style: S.hint }, '留空就是没有音乐。建议导入一首歌的几段，短一点，抽起来才有换歌的感觉。')
-          : h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
-              tracks.map((track) => h('div', {
-                key: track.id,
-                style: { ...S.row, justifyContent: 'space-between', gap: '10px', fontSize: '12px' },
+
+        h('div', { style: box },
+          tracks.length === 0
+            ? h('div', {
+                style: { padding: '14px 14px', fontSize: '12px', opacity: 0.55, textAlign: 'center' },
+              }, '还没有音乐。点上面「导入音乐」，可以多选。')
+            : h('div', {
+                style: { display: 'flex', flexDirection: 'column', maxHeight: '220px', overflowY: 'auto' },
               },
-                h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
-                  track.name || track.id),
-                h('span', { style: { ...S.row, gap: '8px', flex: 'none' } },
-                  h('span', { style: { opacity: 0.55 } }, humanSize(track.size)),
+                tracks.map((track, i) => h('div', {
+                  key: track.id,
+                  style: {
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '10px',
+                    padding: '7px 12px',
+                    fontSize: '12px',
+                    borderTop: i === 0 ? 'none' : '1px solid rgba(127,127,127,.16)',
+                  },
+                },
+                  h('span', {
+                    style: {
+                      flex: 1,
+                      minWidth: 0,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    },
+                  }, track.name || track.id),
+                  h('span', { style: { opacity: 0.5, flex: 'none' } }, humanSize(track.size)),
                   h('button', {
                     type: 'button',
-                    style: S.danger,
+                    style: { ...S.danger, flex: 'none' },
                     onClick: () => {
                       removeMusic(packId, imageId, track.id).then(onChanged).catch(() => {})
                     },
                   }, '删除'),
-                ),
-              )),
-            ),
+                )),
+              ),
+        ),
+
         note === '' ? null : h('span', { style: S.hint }, note),
       )
     }
@@ -2553,6 +2643,14 @@ window.__ModuleLoader__.load({
           // a missed mutation and lets the text rotate on a quiet row.
           const interval = setInterval(() => {
             paint(document)
+            // paint 靠突变和这条心跳触发；行被整块拿走时补一刀，音乐没机会赖着不放
+            let hasRow = false
+            try {
+              hasRow = document.querySelectorAll(ROW).length > 0
+            } catch {
+              hasRow = false
+            }
+            Music.tick(hasRow)
           }, 1000)
           // 字形每 80ms 一帧，1 秒的节拍会让它一顿一顿地跳，所以单独给一条快节拍。
           // 只改文字和颜色，不做查询以外的重活。
