@@ -11,6 +11,23 @@ more than the answer. This replaces its icon and its copy, and keeps the timer.
 
 ▶ **[宣传片 · B 站](https://www.bilibili.com/video/BV1Layaz2Em7)** （1 分 45 秒，三套皮肤 + 安装全过程）
 
+## Screenshots / 截图
+
+**设置页** —— 套组卡片、字形（字符转圈）、文字渐变、音乐，都在这一页里。
+
+![设置页](assets/screenshots/2-settings.png)
+
+**音乐池** —— 每个套组一个，每张图还能单独配；导入的音频会随套组 zip 一起走。
+
+![通用音乐池](assets/screenshots/6-music.png)
+
+**三套皮肤的那一行** —— 图和句分开抽，同一任务跑两次不重样。
+
+| 蓝色大肥鱼 | 酒狐 | ClaudeCode |
+|---|---|---|
+| ![蓝色大肥鱼](assets/screenshots/3-fish.png) | ![酒狐](assets/screenshots/4-jjfox.png) | ![ClaudeCode](assets/screenshots/5-claude.png) |
+
+
 ---
 
 ## What it does
