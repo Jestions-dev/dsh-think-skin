@@ -1331,7 +1331,7 @@ window.__ModuleLoader__.load({
         }
       })
 
-      function adoptPack(entry) {
+      function adoptPack(entry, keepDetail) {
         setSelected(entry.id)
         const appearance = entry.appearance === undefined ? {} : entry.appearance
         const colors = Array.isArray(appearance.gradient) ? appearance.gradient : []
@@ -1347,10 +1347,11 @@ window.__ModuleLoader__.load({
         setSpinInterval(Number.isFinite(Number(spinner.interval)) ? Number(spinner.interval) : 165)
         setSpinPeriod(Number.isFinite(Number(spinner.period)) ? Number(spinner.period) : 2000)
         setSpinColor(typeof spinner.color === 'string' ? spinner.color : '')
-        setDetail(null)
+        // 刷新数据时不该把用户正在看的详情页踢掉
+        if (keepDetail !== true) setDetail(null)
       }
 
-      function load(keepSelection) {
+      function load(keepSelection, keepDetail) {
         const wanted = keepSelection === true ? selected : ''
         fetch(ROUTE + '/pack.json', { cache: 'no-store' })
           .then((response) => (response.ok ? response.json() : Promise.reject(new Error('HTTP ' + response.status))))
@@ -1360,7 +1361,7 @@ window.__ModuleLoader__.load({
             const entry = packs.find((p) => p.id === wanted)
               || packs.find((p) => p.id === document.active)
               || packs[0]
-            if (entry !== undefined) adoptPack(entry)
+            if (entry !== undefined) adoptPack(entry, keepDetail)
             if (packs.length === 0) setNote('还没有装任何套')
           })
           .catch((error) => setNote('读取失败：' + error.message))
@@ -2154,7 +2155,7 @@ window.__ModuleLoader__.load({
                 ? (current === undefined ? null : current.fallbackMusic)
                 : (detailImage === undefined ? null : detailImage.music),
               note: '',
-              onChanged: () => load(true),
+              onChanged: () => load(true, true),
             }),
             detail.kind === 'generic'
               ? null
