@@ -40,6 +40,19 @@ const MAX_BODY = 1 << 20
 const MAX_IMAGE = 32 * 1024 * 1024
 /** 套组文件（含 base64 图片）可以有几十 MB。 */
 const MAX_PACK_FILE = 192 * 1024 * 1024
+/** 单个音乐文件的技术上限（不对外宣传，只是防止一次读爆内存）。 */
+const MAX_MUSIC = 512 * 1024 * 1024
+
+const MUSIC_MIME = {
+  '.mp3': 'audio/mpeg',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.ogg': 'audio/ogg',
+  '.oga': 'audio/ogg',
+  '.opus': 'audio/ogg',
+  '.wav': 'audio/wav',
+  '.flac': 'audio/flac',
+}
 
 // ---------------------------------------------------------------- access gate
 
@@ -319,15 +332,27 @@ function cleanGradient(value) {
 /** Mark built-in packs so the page never offers to rename or delete them. */
 function decorate(document) {
   const packs = Array.isArray(document.packs) ? document.packs : []
+
+  // 音乐总开关与音量存在文档根部，跟着套组一起走
+  if (document.settings === null || typeof document.settings !== 'object') document.settings = {}
+  if (typeof document.settings.musicEnabled !== 'boolean') document.settings.musicEnabled = true
+  const volume = Number(document.settings.musicVolume)
+  document.settings.musicVolume = Number.isFinite(volume) && volume >= 0 && volume <= 100
+    ? Math.round(volume)
+    : 40
+
   for (const pack of packs) {
     if (typeof pack.builtin !== 'boolean') pack.builtin = BUILTIN.has(pack.id)
     pack.slug = pack.id
+    if (!Array.isArray(pack.fallbackMusic)) pack.fallbackMusic = []
     if (typeof pack.cover !== 'string' || pack.cover.length === 0) {
       const first = Array.isArray(pack.images) ? pack.images[0] : undefined
       pack.cover = first === undefined ? null : first.file
     }
     for (const image of Array.isArray(pack.images) ? pack.images : []) {
       if (typeof image.useFallback !== 'boolean') image.useFallback = true
+      if (!Array.isArray(image.music)) image.music = []
+      if (typeof image.useFallbackMusic !== 'boolean') image.useFallbackMusic = true
     }
   }
   return document
@@ -375,15 +400,20 @@ export function apply(ctx) {
         return json(await load())
       }
 
-      if (!relative.startsWith('/images/')) return notFound()
-      const file = resolveInside(path.join(root, 'images'), relative.slice('/images/'.length))
+      if (!relative.startsWith('/images/') && !relative.startsWith('/music/')) return notFound()
+
+      // 图片与音乐都在各自根目录下，按同样的「不许逃出根目录」规则解析
+      const music = relative.startsWith('/music/')
+      const base = music ? path.join(root, 'music') : path.join(root, 'images')
+      const file = resolveInside(base, relative.slice(music ? '/music/'.length : '/images/'.length))
       if (file === null) return notFound()
 
       try {
         const bytes = await fs.readFile(file)
+        const table = music ? MUSIC_MIME : MIME
         return new Response(bytes, {
           headers: {
-            'content-type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream',
+            'content-type': table[path.extname(file).toLowerCase()] || 'application/octet-stream',
             'cache-control': 'public, max-age=31536000, immutable',
             'content-length': String(bytes.byteLength),
           },
@@ -471,7 +501,20 @@ export function apply(ctx) {
               if (typeof imagePatch.useFallback === 'boolean') {
                 image.useFallback = imagePatch.useFallback
               }
+              if (typeof imagePatch.useFallbackMusic === 'boolean') {
+                image.useFallbackMusic = imagePatch.useFallbackMusic
+              }
             }
+          }
+        }
+
+        // 音乐总开关与音量：文档根部，所有套组共用
+        const settings = document.settings
+        if (typeof patch.musicEnabled === 'boolean') settings.musicEnabled = patch.musicEnabled
+        if (patch.musicVolume !== undefined) {
+          const volume = Number(patch.musicVolume)
+          if (Number.isFinite(volume) && volume >= 0 && volume <= 100) {
+            settings.musicVolume = Math.round(volume)
           }
         }
 
@@ -515,6 +558,18 @@ export function apply(ctx) {
             document.active = document.packs.length > 0 ? document.packs[0].id : null
           }
           await fs.rm(path.join(root, 'images', id), { recursive: true, force: true })
+          // 这个套的音乐（通用池 + 每张图的池）一起清掉
+          await fs.rm(path.join(root, 'music', id), { recursive: true, force: true })
+          const musicRoot = path.join(root, 'music')
+          try {
+            for (const entry of await fs.readdir(musicRoot)) {
+              if (entry.startsWith(id + '-')) {
+                await fs.rm(path.join(musicRoot, entry), { recursive: true, force: true })
+              }
+            }
+          } catch {
+            /* music 目录还没建过就没什么可删 */
+          }
         } else {
           if (document.packs.some((p) => p.id === id)) return fail(409, '这个套名已经有了')
           document.packs.push({
@@ -623,6 +678,126 @@ export function apply(ctx) {
 
   ctx.effect(() => disposeUpload)
 
+  /** Find a pack, and inside it either the pack-level pool or one image's pool. */
+  function musicBucket(document, packId, imageId) {
+    const pack = document.packs.find((p) => p.id === packId)
+    if (pack === undefined) return null
+    if (imageId === null || imageId === undefined || imageId === '') {
+      if (!Array.isArray(pack.fallbackMusic)) pack.fallbackMusic = []
+      return { list: pack.fallbackMusic, dir: packId, holder: pack, key: 'fallbackMusic' }
+    }
+    const image = (Array.isArray(pack.images) ? pack.images : []).find((i) => i.id === imageId)
+    if (image === undefined) return null
+    if (!Array.isArray(image.music)) image.music = []
+    return { list: image.music, dir: packId + '-' + imageId, holder: image, key: 'music' }
+  }
+
+  /**
+   * 音乐导入：原始字节，套组/图片由查询参数指定，文件名走 x-ts-name。
+   * 音频复制进 storages，套组导出时再原样带出去 —— 和图片一个规矩。
+   */
+  const disposeMusicUp = ctx.webServer.register({
+    kind: 'exact',
+    path: ROUTE + '/music',
+    async handler(req, res) {
+      const fail = (status, message) => {
+        res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' })
+        res.end(message)
+      }
+      if (!originAllowed((name) => req.headers[name])) return fail(403, 'forbidden')
+      if (req.method !== 'POST') return fail(405, 'method not allowed')
+      try {
+        const url = new URL(req.url, 'http://local')
+        const packId = url.searchParams.get('pack')
+        const imageId = url.searchParams.get('image')
+        const rawName = req.headers['x-ts-name']
+        if (!packId || !rawName) return fail(400, 'need ?pack= and x-ts-name')
+
+        let name
+        try {
+          name = decodeURIComponent(String(rawName))
+        } catch {
+          return fail(400, 'bad x-ts-name')
+        }
+        const ext = path.extname(name).toLowerCase()
+        if (!Object.prototype.hasOwnProperty.call(MUSIC_MIME, ext)) {
+          return fail(415, 'unsupported audio type: ' + ext)
+        }
+
+        const body = await readBody(req, MAX_MUSIC)
+        if (body.length === 0) return fail(400, 'empty body')
+
+        const document = await load()
+        const bucket = musicBucket(document, packId, imageId)
+        if (bucket === null) return fail(404, '没有这个套或这张图')
+
+        const dir = path.join(root, 'music', bucket.dir)
+        await fs.mkdir(dir, { recursive: true })
+        const file = 'm-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e4) + ext
+        const absolute = path.join(dir, file)
+        await fs.writeFile(absolute, body)
+
+        try {
+          bucket.list.push({
+            id: file.slice(0, -ext.length),
+            file: bucket.dir + '/' + file,
+            name: path.basename(name, ext),
+            size: body.length,
+          })
+          await save(document)
+        } catch (error) {
+          // 字节落盘了但清单没写进去：把文件收回来，别留下没人认领的音频
+          await fs.unlink(absolute).catch(() => {})
+          throw error
+        }
+
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+        })
+        res.end(JSON.stringify({ ok: true, added: bucket.dir + '/' + file, pack: packId }))
+      } catch (error) {
+        fail(400, String((error && error.message) || error))
+      }
+    },
+  })
+
+  ctx.effect(() => disposeMusicUp)
+
+  /** 删掉音乐池里的一首（同时删盘上的文件）。 */
+  const disposeMusicDel = ctx.webServer.register({
+    kind: 'exact',
+    path: ROUTE + '/music-remove',
+    async handler(req, res) {
+      const fail = (status, message) => {
+        res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' })
+        res.end(message)
+      }
+      if (!originAllowed((name) => req.headers[name])) return fail(403, 'forbidden')
+      if (req.method !== 'POST') return fail(405, 'method not allowed')
+      try {
+        const body = JSON.parse((await readBody(req, MAX_BODY)).toString('utf8'))
+        const document = await load()
+        const bucket = musicBucket(document, String(body.pack || ''), body.image)
+        if (bucket === null) return fail(404, '没有这个套或这张图')
+        const index = bucket.list.findIndex((m) => m.id === body.id)
+        if (index < 0) return fail(404, '没有这首')
+        const entry = bucket.list.splice(index, 1)[0]
+        await save(document)
+        await fs.unlink(path.join(root, 'music', entry.file.replace('/', path.sep))).catch(() => {})
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+        })
+        res.end(JSON.stringify({ ok: true }))
+      } catch (error) {
+        fail(400, String((error && error.message) || error))
+      }
+    },
+  })
+
+  ctx.effect(() => disposeMusicDel)
+
   /**
    * Export one pack as a self-contained JSON document.
    *
@@ -645,10 +820,29 @@ export function apply(ctx) {
         const pack = data.packs.find((p) => p.id === body.pack)
         if (pack === undefined) return fail(404, '没有这个套')
 
-        // zip: pack.json + images/<name>，图片原样存，不经 base64
+        // zip: pack.json + images/<name> + music/<name>，二进制原样搬
         const entries = []
         const images = []
         let index = 0
+
+        /** 把一首歌读出来塞进 zip，返回清单里那一条。 */
+        let musicIndex = 0
+        async function packMusicEntry(entry) {
+          const file = path.join(root, 'music', String(entry.file || '').replace('/', path.sep))
+          let bytes = null
+          try {
+            bytes = await fs.readFile(file)
+          } catch {
+            bytes = null
+          }
+          if (bytes === null) return null
+          musicIndex += 1
+          const ext = path.extname(entry.file).toLowerCase() || '.mp3'
+          const name = 'music/m' + String(musicIndex).padStart(3, '0') + ext
+          entries.push({ name, data: bytes })
+          return { file: name, name: entry.name, size: bytes.length }
+        }
+
         for (const image of pack.images) {
           const file = path.join(root, 'images', image.file.replace('/', path.sep))
           let bytes = null
@@ -662,28 +856,48 @@ export function apply(ctx) {
           const ext = path.extname(image.file).toLowerCase() || '.gif'
           const name = 'images/i' + String(index).padStart(3, '0') + ext
           entries.push({ name, data: bytes })
+
+          const trackList = []
+          for (const track of Array.isArray(image.music) ? image.music : []) {
+            const packed = await packMusicEntry(track)
+            if (packed !== null) trackList.push(packed)
+          }
+
           images.push({
             id: image.id,
             name: image.name,
             texts: Array.isArray(image.texts) ? image.texts : [],
             useFallback: image.useFallback !== false,
+            useFallbackMusic: image.useFallbackMusic !== false,
+            music: trackList,
             file: name,
             sourceFile: image.file,
           })
         }
 
+        const packMusic = []
+        for (const track of Array.isArray(pack.fallbackMusic) ? pack.fallbackMusic : []) {
+          const packed = await packMusicEntry(track)
+          if (packed !== null) packMusic.push(packed)
+        }
+
         const manifest = {
           format: 'dsh-think-skin/pack',
-          version: 2,
+          version: 3,
           exportedAt: new Date().toISOString(),
           pack: {
             id: pack.id,
             name: pack.name,
             appearance: pack.appearance || {},
             fallbackTexts: Array.isArray(pack.fallbackTexts) ? pack.fallbackTexts : [],
+            fallbackMusic: packMusic,
             spinner: pack.spinner === undefined ? null : pack.spinner,
             cover: (images.find((i) => i.sourceFile === pack.cover) || images[0] || {}).file || null,
             images,
+          },
+          settings: {
+            musicEnabled: data.settings.musicEnabled,
+            musicVolume: data.settings.musicVolume,
           },
         }
         entries.unshift({ name: 'pack.json', data: Buffer.from(JSON.stringify(manifest, null, 1), 'utf8') })
@@ -861,6 +1075,52 @@ export function apply(ctx) {
         }
         if (cover === null) cover = stored[0].file
 
+        // 音乐：清单里记的路径都在 zip 的 music/ 下，原样搬进 storages
+        const musicRoot = path.join(root, 'music', id)
+        async function importTrack(track) {
+          if (track === null || typeof track !== 'object') return null
+          const raw = typeof track.file === 'string' ? track.file : ''
+          if (raw === '') return null
+          const base = path.basename(raw)
+          const ext = path.extname(base).toLowerCase()
+          if (!Object.prototype.hasOwnProperty.call(MUSIC_MIME, ext)) return null
+          let bytes = null
+          if (zipFiles !== null && zipFiles.get(raw) !== undefined) bytes = zipFiles.get(raw)
+          else if (zipFiles !== null && zipFiles.get(base) !== undefined) bytes = zipFiles.get(base)
+          if (bytes === undefined || bytes === null) return null
+          await fs.mkdir(musicRoot, { recursive: true })
+          const file = 'imp-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e6) + ext
+          await fs.writeFile(path.join(musicRoot, file), bytes)
+          return {
+            id: file.slice(0, -ext.length),
+            file: id + '/' + file,
+            name: typeof track.name === 'string' ? track.name : path.basename(base, ext),
+            size: bytes.length,
+          }
+        }
+
+        const importedFallbackMusic = []
+        for (const track of Array.isArray(source.fallbackMusic) ? source.fallbackMusic : []) {
+          const got = await importTrack(track)
+          if (got !== null) importedFallbackMusic.push(got)
+        }
+
+        // 每张图自己的音乐池：用导出时的文件名对齐（stored 会跳过无效图片）
+        const sourceImages = Array.isArray(source.images) ? source.images : []
+        let cursor = 0
+        for (const item of stored) {
+          if (cursor >= sourceImages.length) break
+          const record = sourceImages[cursor]
+          cursor += 1
+          const list = []
+          for (const track of Array.isArray(record.music) ? record.music : []) {
+            const got = await importTrack(track)
+            if (got !== null) list.push(got)
+          }
+          if (list.length > 0) item.music = list
+          item.useFallbackMusic = record.useFallbackMusic !== false
+        }
+
         data.packs.push({
           id,
           name: id,
@@ -875,6 +1135,7 @@ export function apply(ctx) {
           spinner: source.spinner !== null && typeof source.spinner === 'object'
             ? source.spinner
             : null,
+          fallbackMusic: importedFallbackMusic,
           images: stored,
         })
         if (!data.active) data.active = id
@@ -889,6 +1150,7 @@ export function apply(ctx) {
         res.end(payload)
       } catch (error) {
         if (dir !== null) await fs.rm(dir, { recursive: true, force: true }).catch(() => {})
+        await fs.rm(path.join(root, 'music', String(id || '')), { recursive: true, force: true }).catch(() => {})
         fail(400, String((error && error.message) || error))
       }
     },

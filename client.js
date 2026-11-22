@@ -193,6 +193,15 @@ window.__ModuleLoader__.load({
         .then((data) => {
           const packs = Array.isArray(data.packs) ? data.packs : []
           pack = packs.find((entry) => entry.id === data.active) || packs[0] || null
+          if (data.settings !== undefined && data.settings !== null) {
+            docSettings = {
+              musicEnabled: data.settings.musicEnabled !== false,
+              musicVolume: Number.isFinite(Number(data.settings.musicVolume))
+                ? Number(data.settings.musicVolume)
+                : 40,
+            }
+            Music.applyVolume()
+          }
           return pack
         })
         .catch(() => null)
@@ -577,6 +586,273 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // ---------------------------------------------------------------- music
+
+    /** 文档根部的音乐设置，loadPack 时顺手抓下来。 */
+    let docSettings = { musicEnabled: true, musicVolume: 40 }
+
+    function musicUrl(file) {
+      return ROUTE + '/music/' + encodeURI(file)
+    }
+
+    /** 当前这一行用哪一组音乐：本图的池，加上（默认）通用池。 */
+    function musicPoolOf(state) {
+      if (pack === null || state === null || state === undefined) return []
+      const merged = []
+      const image = state.image
+      if (image !== undefined && image !== null && Array.isArray(image.music)) {
+        for (const track of image.music) merged.push(track)
+      }
+      if (image === undefined || image === null || image.useFallbackMusic !== false) {
+        for (const track of Array.isArray(pack.fallbackMusic) ? pack.fallbackMusic : []) {
+          merged.push(track)
+        }
+      }
+      return merged
+    }
+
+    /**
+     * 思考行出现时放歌：单例、洗牌袋、极短淡入淡出。
+     *
+     * 不走 <audio>：那条路由整块返回字节，而音频元素会先探测长度、按 Range 分块取。
+     * 空闲时把 AudioContext 挂起 —— 一直 running 会让系统不敢进休眠。
+     */
+    const Music = (() => {
+      let audio = null
+      let master = null
+      let gain = null
+      let source = null
+      let playing = null
+      let active = false
+      let pool = []
+      let poolKey = ''
+      let bag = []
+      let token = 0
+      let idleTimer = 0
+      const cache = new Map()
+
+      function ensure() {
+        if (audio !== null) return audio
+        const AC = window.AudioContext || window.webkitAudioContext
+        if (AC === undefined) return null
+        try {
+          audio = new AC()
+          master = audio.createGain()
+          master.gain.value = volumeGain()
+          master.connect(audio.destination)
+        } catch {
+          audio = null
+        }
+        return audio
+      }
+
+      function volumeGain() {
+        const raw = Number(docSettings.musicVolume)
+        const v = Number.isFinite(raw) ? Math.max(0, Math.min(100, raw)) : 40
+        return Math.pow(v / 100, 1.7) * 0.9
+      }
+
+      /** 浏览器要求有用户手势才出声：第一次交互解锁一次就够。 */
+      function unlock() {
+        const ac = ensure()
+        if (ac === null) return Promise.resolve()
+        if (ac.state === 'suspended') return ac.resume().catch(() => {})
+        return Promise.resolve()
+      }
+      if (typeof document !== 'undefined') {
+        const once = () => {
+          unlock()
+          document.removeEventListener('pointerdown', once, true)
+          document.removeEventListener('keydown', once, true)
+        }
+        document.addEventListener('pointerdown', once, true)
+        document.addEventListener('keydown', once, true)
+      }
+
+      function idle() {
+        clearTimeout(idleTimer)
+        idleTimer = setTimeout(() => {
+          if (audio !== null && playing === null && audio.state === 'running') {
+            audio.suspend().catch(() => {})
+          }
+        }, 20000)
+      }
+
+      async function bytes(file) {
+        if (cache.has(file)) return cache.get(file)
+        try {
+          const response = await fetch(musicUrl(file), { cache: 'force-cache' })
+          if (!response.ok) return null
+          const buffer = await response.arrayBuffer()
+          cache.set(file, buffer)
+          while (cache.size > 3) cache.delete(cache.keys().next().value)
+          return buffer
+        } catch {
+          return null
+        }
+      }
+
+      function shuffle() {
+        bag = pool.slice()
+        for (let i = bag.length - 1; i > 0; i -= 1) {
+          const j = Math.floor(Math.random() * (i + 1))
+          const tmp = bag[i]
+          bag[i] = bag[j]
+          bag[j] = tmp
+        }
+        if (bag.length > 1 && bag[0].id === playing) {
+          const tmp = bag[0]
+          bag[0] = bag[1]
+          bag[1] = tmp
+        }
+      }
+
+      function pick() {
+        if (pool.length === 0) return null
+        if (bag.length === 0) shuffle()
+        return bag.shift() || null
+      }
+
+      function cut(ms) {
+        if (gain === null || audio === null) return
+        const now = audio.currentTime
+        try {
+          gain.gain.cancelScheduledValues(now)
+          gain.gain.setValueAtTime(gain.gain.value, now)
+          gain.gain.linearRampToValueAtTime(0.0001, now + ms / 1000)
+        } catch {
+          /* 节点可能已经断开 */
+        }
+      }
+
+      function silence() {
+        if (source !== null) {
+          try {
+            source.stop()
+          } catch {
+            /* 已经停了 */
+          }
+          source = null
+        }
+        if (gain !== null) {
+          try {
+            gain.disconnect()
+          } catch {
+            /* 同上 */
+          }
+          gain = null
+        }
+        playing = null
+      }
+
+      async function play(track, fadeIn) {
+        const ac = ensure()
+        if (ac === null) return
+        const mine = ++token
+        const data = await bytes(track.file)
+        if (mine !== token) return
+        if (data === null) {
+          next()
+          return
+        }
+        let buffer
+        try {
+          buffer = await ac.decodeAudioData(data.slice(0))
+        } catch {
+          next()
+          return
+        }
+        if (mine !== token) return
+        await unlock()
+        if (mine !== token) return
+
+        silence()
+        playing = track.id
+        gain = ac.createGain()
+        gain.gain.value = 0.0001
+        gain.connect(master)
+        source = ac.createBufferSource()
+        source.buffer = buffer
+        source.connect(gain)
+        const started = ac.currentTime
+        const fade = Math.min(0.25, buffer.duration / 4)
+        try {
+          gain.gain.setValueAtTime(0.0001, started)
+          gain.gain.linearRampToValueAtTime(1, started + (fadeIn ? fade : 0.02))
+        } catch {
+          /* 极短的文件可能排不进两个事件 */
+        }
+        const tail = Math.max(0, buffer.duration - Math.min(0.3, buffer.duration / 4))
+        source.onended = () => {
+          if (mine !== token) return
+          source = null
+          gain = null
+          playing = null
+          if (active) setTimeout(() => next(), 120)
+          else idle()
+        }
+        try {
+          source.start(0)
+        } catch {
+          next()
+          return
+        }
+        setTimeout(() => {
+          if (mine === token) cut(260)
+        }, Math.max(200, tail * 1000))
+      }
+
+      function next() {
+        if (!active) return
+        const track = pick()
+        if (track === null) return
+        play(track, true)
+      }
+
+      function stop() {
+        token += 1
+        if (playing !== null) {
+          cut(300)
+          const dying = source
+          setTimeout(() => {
+            if (source === dying) silence()
+          }, 320)
+        }
+        idle()
+      }
+
+      /** 思考行在不在、用哪个池，都从这里进。 */
+      function sync(want, list) {
+        const enabled = docSettings.musicEnabled !== false
+        const key = list.map((t) => t.id).join('|')
+        if (key !== poolKey) {
+          poolKey = key
+          bag = []
+          if (playing !== null && !list.some((t) => t.id === playing)) stop()
+        }
+        pool = list
+        const should = want && enabled && list.length > 0
+        if (!should) {
+          if (active) stop()
+          active = false
+          return
+        }
+        active = true
+        if (playing === null) next()
+      }
+
+      function applyVolume() {
+        if (master !== null && audio !== null) {
+          try {
+            master.gain.setTargetAtTime(volumeGain(), audio.currentTime, 0.05)
+          } catch {
+            master.gain.value = volumeGain()
+          }
+        }
+      }
+
+      return { sync, applyVolume, unlock, stop }
+    })()
     function paint(root) {
       if (pack === null) {
         loadPack().then(() => paint(document))
@@ -592,21 +868,34 @@ window.__ModuleLoader__.load({
         ? pack.spinner
         : null
 
+      let firstState = null
       for (const row of rows) {
         const state = stateOf(row)
         if (state === null) continue
+        if (firstState === null) firstState = state
         if (spinner !== null) swapSpinner(row, spinner)
         else swapIcon(row, imageUrl(state.image.file))
         const targets = swapCopy(row, state.text)
         applyGradient(targets, pack.appearance)
       }
       tickSpinners(document)
+      // 行还在 = 正在思考，音乐跟着走；行消失就淡出
+      Music.sync(rows.length > 0, musicPoolOf(firstState))
     }
 
     /** Replace the in-memory pack after a save, then repaint. */
     function adoptDocument(data) {
       const packs = Array.isArray(data.packs) ? data.packs : []
       pack = packs.find((entry) => entry.id === data.active) || packs[0] || null
+      if (data.settings !== undefined && data.settings !== null) {
+        docSettings = {
+          musicEnabled: data.settings.musicEnabled !== false,
+          musicVolume: Number.isFinite(Number(data.settings.musicVolume))
+            ? Number(data.settings.musicVolume)
+            : 40,
+        }
+        Music.applyVolume()
+      }
       paint(document)
     }
 
@@ -944,6 +1233,8 @@ window.__ModuleLoader__.load({
     function SettingsPanel() {
       const [data, setData] = React.useState(null)
       const [selected, setSelected] = React.useState('')
+      const [musicEnabled, setMusicEnabled] = React.useState(true)
+      const [musicVolume, setMusicVolume] = React.useState(40)
       const [gradient, setGradient] = React.useState(DEFAULT_GRADIENT)
       const [gradientMode, setGradientMode] = React.useState('static')
       const [gradientSpeed, setGradientSpeed] = React.useState(3)
@@ -955,6 +1246,13 @@ window.__ModuleLoader__.load({
       const [draft, setDraft] = React.useState('')
       const [note, setNote] = React.useState('')
       const [newName, setNewName] = React.useState('')
+
+      React.useEffect(() => {
+        const settings = data === null || data.settings === undefined ? null : data.settings
+        if (settings === null || settings === null) return
+        setMusicEnabled(settings.musicEnabled !== false)
+        setMusicVolume(Number.isFinite(Number(settings.musicVolume)) ? Number(settings.musicVolume) : 40)
+      }, [data])
       const [coverFile, setCoverFile] = React.useState(null)
       const [coverPreview, setCoverPreview] = React.useState('')
       const [seedFiles, setSeedFiles] = React.useState([])
@@ -1361,7 +1659,88 @@ window.__ModuleLoader__.load({
         }
       }
 
-      function openGeneric() {
+      // ---- music pool ------------------------------------------------------
+
+    /** 把一首歌传进某个池：imageId 为空 = 这个套的通用音乐池。 */
+    function uploadMusic(file, packId, imageId) {
+      const query = '?pack=' + encodeURIComponent(packId)
+        + (imageId ? '&image=' + encodeURIComponent(imageId) : '')
+      return fetch(ROUTE + '/music' + query, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/octet-stream',
+          'x-ts-name': encodeURIComponent(file.name),
+        },
+        body: file,
+      }).then((response) => {
+        if (!response.ok) throw new Error('music ' + response.status)
+        return response.json()
+      })
+    }
+
+    function removeMusic(packId, imageId, id) {
+      return post(ROUTE + '/music-remove', { pack: packId, image: imageId || undefined, id })
+    }
+
+    function humanSize(bytes) {
+      const n = Number(bytes) || 0
+      if (n < 1024) return n + ' B'
+      if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB'
+      return (n / 1024 / 1024).toFixed(1) + ' MB'
+    }
+
+    /** 一个音乐池：导入、列表、删除。通用池和单图池共用这一个。 */
+    function MusicPool({ packId, imageId, list, note, onChanged }) {
+      const [busy, setBusy] = React.useState('')
+      const tracks = Array.isArray(list) ? list : []
+
+      const add = (files) => {
+        const picked = Array.from(files || [])
+        if (picked.length === 0) return
+        setBusy('导入中… ' + picked.length + ' 个')
+        let done = 0
+        const step = () => {
+          done += 1
+          if (done < picked.length) return
+          setBusy('')
+          onChanged()
+        }
+        for (const file of picked) {
+          uploadMusic(file, packId, imageId).catch(() => {}).finally(step)
+        }
+      }
+
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } },
+        h('div', { style: S.row },
+          h(FilePick, { label: '导入音乐', multiple: true, accept: 'audio/*', onFiles: add }),
+          h('span', { style: S.hint }, tracks.length === 0 ? '还没有音乐' : tracks.length + ' 首'),
+          busy === '' ? null : h('span', { style: S.hint }, busy),
+        ),
+        tracks.length === 0
+          ? h('div', { style: S.hint }, '留空就是没有音乐。建议导入一首歌的几段，短一点，抽起来才有换歌的感觉。')
+          : h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+              tracks.map((track) => h('div', {
+                key: track.id,
+                style: { ...S.row, justifyContent: 'space-between', gap: '10px', fontSize: '12px' },
+              },
+                h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                  track.name || track.id),
+                h('span', { style: { ...S.row, gap: '8px', flex: 'none' } },
+                  h('span', { style: { opacity: 0.55 } }, humanSize(track.size)),
+                  h('button', {
+                    type: 'button',
+                    style: S.danger,
+                    onClick: () => {
+                      removeMusic(packId, imageId, track.id).then(onChanged).catch(() => {})
+                    },
+                  }, '删除'),
+                ),
+              )),
+            ),
+        note === '' ? null : h('span', { style: S.hint }, note),
+      )
+    }
+    function openGeneric() {
         setNote('')
         setDetail({ kind: 'generic' })
         setDraft((current === undefined ? [] : current.fallbackTexts || []).join('\n'))
@@ -1385,6 +1764,12 @@ window.__ModuleLoader__.load({
 
       function toggleFallback(image) {
         commit({ pack: selected, image: { id: image.id, useFallback: image.useFallback === false } }, '')
+      }
+
+      function toggleFallbackMusic(image) {
+        if (image === undefined) return
+        const next = image.useFallbackMusic === false
+        commit({ pack: selected, image: { id: image.id, useFallbackMusic: next } }, '')
       }
 
       // ---- detail view -------------------------------------------------------
@@ -1670,6 +2055,35 @@ window.__ModuleLoader__.load({
             : null,
 
           h('div', null,
+            h('span', { style: S.label },
+              detail.kind === 'generic' ? '通用音乐池（这一套所有图共用）' : '这张图的音乐池'),
+            h(MusicPool, {
+              packId: selected,
+              imageId: detail.kind === 'generic' ? '' : detail.id,
+              list: detail.kind === 'generic'
+                ? (current === undefined ? null : current.fallbackMusic)
+                : (detailImage === undefined ? null : detailImage.music),
+              note: '',
+              onChanged: () => load(true),
+            }),
+            detail.kind === 'generic'
+              ? null
+              : h('div', { style: { ...S.row, justifyContent: 'space-between', marginTop: '4px' } },
+                  h('div', null,
+                    h('div', { style: { fontSize: '13px' } }, '也用通用音乐'),
+                    h('div', { style: S.hint }, '开启：和通用音乐池合在一起抽（默认）；关闭：只放这张图自己的'),
+                  ),
+                  h('div', {
+                    className: 'ts-switch',
+                    'data-on': detailImage !== undefined && detailImage.useFallbackMusic !== false ? '1' : '0',
+                    onClick: () => toggleFallbackMusic(detailImage),
+                    role: 'switch',
+                    'aria-checked': detailImage !== undefined && detailImage.useFallbackMusic !== false,
+                  }),
+                ),
+          ),
+
+          h('div', null,
             h('span', { style: S.label }, '一行一句；这张图会从这些句子里随机'),
             h('textarea', {
               value: draft,
@@ -1708,6 +2122,53 @@ window.__ModuleLoader__.load({
             title: '点击切换：跟随系统 → 浅色 → 深色',
             onClick: cycleTheme,
           }, '主题：' + themeLabel),
+        ),
+
+        // 音乐：总开关 + 音量（照系统音量条那一排）
+        h('div', null,
+          h('span', { style: S.label }, '音乐'),
+          h('div', {
+            style: {
+              display: 'flex', alignItems: 'center', gap: '12px',
+              padding: '10px 14px', borderRadius: '10px',
+              background: 'rgba(127,127,127,.07)',
+            },
+          },
+            h('svg', {
+              width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none',
+              stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round',
+              strokeLinejoin: 'round', style: { opacity: musicEnabled ? 0.9 : 0.35, flex: 'none' },
+            },
+              h('path', { d: 'M4 9v6h3.5L12 19V5L7.5 9H4z' }),
+              musicEnabled && musicVolume > 0 ? h('path', { d: 'M16 8.5a5 5 0 0 1 0 7' }) : null,
+              musicEnabled && musicVolume > 50 ? h('path', { d: 'M18.6 6a8.5 8.5 0 0 1 0 12' }) : null,
+            ),
+            h('input', {
+              type: 'range', min: 0, max: 100, step: 1,
+              value: musicVolume,
+              disabled: !musicEnabled,
+              style: { flex: 1, minWidth: 0, accentColor: '#4c8bf5' },
+              onChange: (event) => {
+                const next = Number(event.target.value)
+                setMusicVolume(next)
+                Music.previewVolume(next)
+              },
+              onPointerUp: () => commit({ musicVolume: musicVolume }, ''),
+              onKeyUp: () => commit({ musicVolume: musicVolume }, ''),
+            }),
+            h('span', { style: { fontSize: '12px', opacity: 0.6, width: '34px', textAlign: 'right', flex: 'none' } },
+              musicEnabled ? musicVolume + '%' : '关'),
+            h('div', {
+              className: 'ts-switch',
+              'data-on': musicEnabled ? '1' : '0',
+              role: 'switch',
+              'aria-checked': musicEnabled,
+              title: '思考时放音乐',
+              onClick: () => commit({ musicEnabled: !musicEnabled }, ''),
+            }),
+          ),
+          h('div', { style: S.hint },
+            '只在「思考中」那一行出现时播放，行一消失就淡出。用哪几首在下面每张图 / 通用池里配。'),
         ),
 
         // pack cards
