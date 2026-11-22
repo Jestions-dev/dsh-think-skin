@@ -372,6 +372,19 @@ export const inject = ['webServer']
 export function apply(ctx) {
   const root = dataRoot()
 
+  /**
+   * 读-改-写的临界区。
+   *
+   * 一次多选导入会并发打到同一条路由，而每条都要 load → 改 → save；
+   * 不加锁的话后写的会把先写的覆盖掉（三个文件只留下最后一个）。
+   */
+  let critical = Promise.resolve()
+  function lock(fn) {
+    const run = critical.then(fn, fn)
+    critical = run.then(() => {}, () => {})
+    return run
+  }
+
   /** Read the document, or an empty skeleton when no pack is installed yet. */
   async function load() {
     try {
@@ -740,35 +753,41 @@ export function apply(ctx) {
         const body = await readBody(req, MAX_MUSIC)
         if (body.length === 0) return fail(400, 'empty body')
 
-        const document = await load()
-        const bucket = musicBucket(document, packId, imageId)
-        if (bucket === null) return fail(404, '没有这个套或这张图')
+        // 整个「读文档 → 落盘 → 写清单」都在锁里：多选导入是并发请求，
+        // 不加锁时后一次 save 会用旧文档把前一次的结果覆盖掉
+        const result = await lock(async () => {
+          const document = await load()
+          const bucket = musicBucket(document, packId, imageId)
+          if (bucket === null) return { status: 404, message: '没有这个套或这张图' }
 
-        const dir = path.join(root, 'music', bucket.dir)
-        await fs.mkdir(dir, { recursive: true })
-        const file = 'm-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e4) + ext
-        const absolute = path.join(dir, file)
-        await fs.writeFile(absolute, body)
+          const dir = path.join(root, 'music', bucket.dir)
+          await fs.mkdir(dir, { recursive: true })
+          const file = 'm-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e6) + ext
+          const absolute = path.join(dir, file)
+          await fs.writeFile(absolute, body)
 
-        try {
           bucket.list.push({
             id: file.slice(0, -ext.length),
             file: bucket.dir + '/' + file,
             name: path.basename(name, ext),
             size: body.length,
           })
-          await save(document)
-        } catch (error) {
-          // 字节落盘了但清单没写进去：把文件收回来，别留下没人认领的音频
-          await fs.unlink(absolute).catch(() => {})
-          throw error
-        }
+          try {
+            await save(document)
+          } catch (error) {
+            // 字节落盘了但清单没写进去：把文件收回来，别留下没人认领的音频
+            await fs.unlink(absolute).catch(() => {})
+            throw error
+          }
+          return { status: 200, added: bucket.dir + '/' + file }
+        })
 
+        if (result.status !== 200) return fail(result.status, result.message)
         res.writeHead(200, {
           'content-type': 'application/json; charset=utf-8',
           'cache-control': 'no-store',
         })
-        res.end(JSON.stringify({ ok: true, added: bucket.dir + '/' + file, pack: packId }))
+        res.end(JSON.stringify({ ok: true, added: result.added, pack: packId }))
       } catch (error) {
         fail(400, String((error && error.message) || error))
       }
@@ -790,14 +809,18 @@ export function apply(ctx) {
       if (req.method !== 'POST') return fail(405, 'method not allowed')
       try {
         const body = JSON.parse((await readBody(req, MAX_BODY)).toString('utf8'))
-        const document = await load()
-        const bucket = musicBucket(document, String(body.pack || ''), body.image)
-        if (bucket === null) return fail(404, '没有这个套或这张图')
-        const index = bucket.list.findIndex((m) => m.id === body.id)
-        if (index < 0) return fail(404, '没有这首')
-        const entry = bucket.list.splice(index, 1)[0]
-        await save(document)
-        await fs.unlink(path.join(root, 'music', entry.file.replace('/', path.sep))).catch(() => {})
+        const outcome = await lock(async () => {
+          const document = await load()
+          const bucket = musicBucket(document, String(body.pack || ''), body.image)
+          if (bucket === null) return { status: 404, message: '没有这个套或这张图' }
+          const index = bucket.list.findIndex((m) => m.id === body.id)
+          if (index < 0) return { status: 404, message: '没有这首' }
+          const entry = bucket.list.splice(index, 1)[0]
+          await save(document)
+          return { status: 200, file: entry.file }
+        })
+        if (outcome.status !== 200) return fail(outcome.status, outcome.message)
+        await fs.unlink(path.join(root, 'music', outcome.file.replace('/', path.sep))).catch(() => {})
         res.writeHead(200, {
           'content-type': 'application/json; charset=utf-8',
           'cache-control': 'no-store',
@@ -808,7 +831,6 @@ export function apply(ctx) {
       }
     },
   })
-
   ctx.effect(() => disposeMusicDel)
 
   /**

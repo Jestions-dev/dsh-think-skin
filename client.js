@@ -1803,17 +1803,22 @@ window.__ModuleLoader__.load({
       const add = (files) => {
         const picked = Array.from(files || [])
         if (picked.length === 0) return
-        setBusy('导入中… ' + picked.length + ' 个')
-        let done = 0
-        const step = () => {
-          done += 1
-          if (done < picked.length) return
-          setBusy('')
+        let failed = 0
+        // 一首一首传：宿主那边是「读清单 → 追加 → 写回」，
+        // 并发会把彼此的写入盖掉（三首只留下最后一首就是这么来的）
+        const runAll = async () => {
+          for (let i = 0; i < picked.length; i += 1) {
+            setBusy('导入中… ' + (i + 1) + '/' + picked.length)
+            try {
+              await uploadMusic(picked[i], packId, imageId)
+            } catch {
+              failed += 1
+            }
+          }
+          setBusy(failed === 0 ? '' : '有 ' + failed + ' 首失败')
           onChanged()
         }
-        for (const file of picked) {
-          uploadMusic(file, packId, imageId).catch(() => {}).finally(step)
-        }
+        runAll()
       }
 
       // 一个框装一整池：内容多就往下长，长到 220px 之后自己滚
