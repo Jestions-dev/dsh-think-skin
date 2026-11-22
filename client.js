@@ -617,7 +617,9 @@ window.__ModuleLoader__.load({
      * 不走 <audio>：那条路由整块返回字节，而音频元素会先探测长度、按 Range 分块取。
      * 空闲时把 AudioContext 挂起 —— 一直 running 会让系统不敢进休眠。
      */
-    const Music = (() => {
+    const Music = (typeof window !== 'undefined' && window.__tsMusic !== undefined)
+      ? window.__tsMusic
+      : (() => {
       let audio = null
       let master = null
       let playing = null        // 正在放的曲目 id
@@ -912,8 +914,15 @@ window.__ModuleLoader__.load({
         applyVolume()
       }
 
-      return { sync, tick, applyVolume, previewVolume, unlock, stop }
-    })()
+      return { sync, tick, applyVolume, previewVolume, unlock, stop, state: () => ({ playing, live: live.size, active, starting }) }
+      })()
+
+    // 诊断：控制台里 __tsMusicState() 看引擎真实状态；顺带防止重复实例
+    if (typeof window !== 'undefined') {
+      window.__tsMusic = Music
+      window.__tsMusicState = () => Music.state()
+    }
+
     function paint(root) {
       if (pack === null) {
         loadPack().then(() => paint(document))
