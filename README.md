@@ -1,5 +1,7 @@
 # dsh-think-skin
 
+![ThinkSkin 宣传片封面](assets/screenshots/1-cover.png)
+
 **Give the DSH thinking row your own face and your own words.**
 
 The row that says `深度求索中，用时 3秒 ···` next to a whale tail is the one thing you look at

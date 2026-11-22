@@ -42,6 +42,8 @@
     "tools/compile-pack.py",
     "assets/texts",
     "assets/music",
+    "assets/screenshots",
+    "screenshots.json",
     "tools/export-texts.py",
     "locale"
   ],
