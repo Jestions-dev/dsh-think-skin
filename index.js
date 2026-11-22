@@ -41,6 +41,72 @@ const MAX_IMAGE = 32 * 1024 * 1024
 /** 套组文件（含 base64 图片）可以有几十 MB。 */
 const MAX_PACK_FILE = 192 * 1024 * 1024
 
+// ---------------------------------------------------------------- access gate
+
+/**
+ * 这些路由挂在 DSH 自己的 web server 上，任何网页都能向它发请求——所以必须
+ * 自己确认请求来自 DSH 的页面，而不是别的标签页。
+ *
+ * 判断顺序：
+ *   1. Sec-Fetch-Site 由浏览器附加，页面 JS 改不了：cross-site / same-site 直接拒。
+ *   2. 有 Origin 时，它的 host 必须和 Host 头一致（同源）。
+ *   3. 两个头都没有，说明不是浏览器（curl、脚本），那是本机主人，放行。
+ */
+function originAllowed(get) {
+  const site = String(get('sec-fetch-site') || '').toLowerCase()
+  if (site === 'cross-site' || site === 'same-site') return false
+
+  const origin = get('origin')
+  if (origin !== undefined && origin !== null && origin !== '') {
+    try {
+      return new URL(String(origin)).host === String(get('host') || '')
+    } catch {
+      return false
+    }
+  }
+  return true
+}
+
+/** 本机回环、内网、云元数据地址——导入下载器一律不碰。 */
+function isPrivateHost(hostname) {
+  const host = String(hostname).toLowerCase().replace(/^\[|\]$/g, '')
+  if (host === '' || host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) {
+    return true
+  }
+
+  const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
+  if (v4 !== null) {
+    const a = Number(v4[1])
+    const b = Number(v4[2])
+    if (a === 0 || a === 127 || a === 10) return true
+    if (a === 169 && b === 254) return true          // link-local / 云元数据
+    if (a === 172 && b >= 16 && b <= 31) return true
+    if (a === 192 && b === 168) return true
+    if (a === 100 && b >= 64 && b <= 127) return true // CGNAT
+    return false
+  }
+
+  if (host.includes(':')) {
+    if (host === '::1' || host === '::') return true
+    if (host.startsWith('fc') || host.startsWith('fd')) return true  // 唯一本地
+    if (host.startsWith('fe80')) return true                          // 链路本地
+  }
+  return false
+}
+
+/** 只有 http/https、且不指向本机/内网的 URL 才能交给主机去下载。 */
+function safeRemoteUrl(value) {
+  let url
+  try {
+    url = new URL(String(value))
+  } catch {
+    return null
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+  if (isPrivateHost(url.hostname)) return null
+  return url
+}
+
 // ---------------------------------------------------------------- zip helpers
 
 const CRC_TABLE = (() => {
@@ -291,6 +357,12 @@ export function apply(ctx) {
     kind: 'prefix',
     path: ROUTE,
     async resource(request) {
+      if (!originAllowed((name) => request.headers.get(name))) {
+        return new Response('forbidden', {
+          status: 403,
+          headers: { 'content-type': 'text/plain; charset=utf-8' },
+        })
+      }
       let pathname
       try {
         pathname = new URL(request.url).pathname
@@ -336,6 +408,7 @@ export function apply(ctx) {
         res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' })
         res.end(message)
       }
+      if (!originAllowed((name) => req.headers[name])) return fail(403, 'forbidden')
       if (req.method !== 'POST') return fail(405, 'method not allowed')
       try {
         const patch = JSON.parse((await readBody(req, MAX_BODY)).toString('utf8'))
@@ -424,6 +497,7 @@ export function apply(ctx) {
         res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' })
         res.end(message)
       }
+      if (!originAllowed((name) => req.headers[name])) return fail(403, 'forbidden')
       if (req.method !== 'POST') return fail(405, 'method not allowed')
       try {
         const body = JSON.parse((await readBody(req, MAX_BODY)).toString('utf8'))
@@ -475,6 +549,7 @@ export function apply(ctx) {
         res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' })
         res.end(message)
       }
+      if (!originAllowed((name) => req.headers[name])) return fail(403, 'forbidden')
       if (req.method !== 'POST') return fail(405, 'method not allowed')
       try {
         const url = new URL(req.url, 'http://local')
@@ -562,6 +637,7 @@ export function apply(ctx) {
         res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' })
         res.end(message)
       }
+      if (!originAllowed((name) => req.headers[name])) return fail(403, 'forbidden')
       if (req.method !== 'POST') return fail(405, 'method not allowed')
       try {
         const body = JSON.parse((await readBody(req, MAX_BODY)).toString('utf8'))
@@ -652,6 +728,7 @@ export function apply(ctx) {
         res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' })
         res.end(message)
       }
+      if (!originAllowed((name) => req.headers[name])) return fail(403, 'forbidden')
       if (req.method !== 'POST') return fail(405, 'method not allowed')
       let dir = null
       try {
@@ -672,14 +749,40 @@ export function apply(ctx) {
           if (request.file !== undefined) {
             document = request.file
           } else if (typeof request.url === 'string') {
+            // 主机替浏览器去下载：只允许 http/https，且不能落到本机或内网，
+            // 否则这个接口就成了「让别人的网页指挥我的机器访问内网」的通道。
+            const target = safeRemoteUrl(request.url)
+            if (target === null) {
+              return fail(400, '这个链接不行：只支持 http/https，且不能指向本机或内网地址。')
+            }
             let response
             try {
-              response = await fetch(request.url, { redirect: 'follow' })
+              response = await fetch(target, {
+                redirect: 'follow',
+                signal: AbortSignal.timeout(30000),
+              })
             } catch (error) {
               return fail(400, '下载失败：' + String((error && error.message) || error))
             }
+            // 跟随重定向之后可能已经跳到内网，再验一次
+            let finalUrl = null
+            try {
+              finalUrl = new URL(response.url)
+            } catch {
+              finalUrl = null
+            }
+            if (finalUrl !== null && (finalUrl.protocol === 'http:' || finalUrl.protocol === 'https:')) {
+              if (isPrivateHost(finalUrl.hostname)) {
+                return fail(400, '这个链接不行：重定向到了本机或内网地址。')
+              }
+            }
             if (!response.ok) return fail(400, '下载失败：HTTP ' + response.status)
+            const declared = Number(response.headers.get('content-length') || '0')
+            if (Number.isFinite(declared) && declared > MAX_PACK_FILE) {
+              return fail(413, '文件太大，超过 192 MB。')
+            }
             const downloaded = Buffer.from(await response.arrayBuffer())
+            if (downloaded.length > MAX_PACK_FILE) return fail(413, '文件太大，超过 192 MB。')
 
             // 网盘分享页、登录页、错误页都会返回 HTML；直接说清楚，别让用户猜
             const head = downloaded.subarray(0, 512).toString('utf8').trim().toLowerCase()
