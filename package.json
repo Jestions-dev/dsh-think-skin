@@ -41,6 +41,7 @@
     "assets/酒狐",
     "tools/compile-pack.py",
     "assets/texts",
+    "assets/music",
     "tools/export-texts.py",
     "locale"
   ],

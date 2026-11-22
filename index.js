@@ -340,6 +340,10 @@ function decorate(document) {
   document.settings.musicVolume = Number.isFinite(volume) && volume >= 0 && volume <= 100
     ? Math.round(volume)
     : 40
+  // 一轮里怎么选歌：随机 / 顺序 / 单曲循环
+  if (!['random', 'sequential', 'single'].includes(document.settings.musicMode)) {
+    document.settings.musicMode = 'random'
+  }
 
   for (const pack of packs) {
     if (typeof pack.builtin !== 'boolean') pack.builtin = BUILTIN.has(pack.id)
@@ -356,6 +360,11 @@ function decorate(document) {
     }
   }
   return document
+}
+
+/** 内置套组自带的音乐：包里的文件，首次加载时复制进 storages。 */
+const BUILTIN_MUSIC = {
+  '酒狐': ['朋友的酒 1.ogg', '朋友的酒 2.ogg', '朋友的酒 3.ogg'],
 }
 
 export const inject = ['webServer']
@@ -516,6 +525,10 @@ export function apply(ctx) {
           if (Number.isFinite(volume) && volume >= 0 && volume <= 100) {
             settings.musicVolume = Math.round(volume)
           }
+        }
+        if (typeof patch.musicMode === 'string'
+          && ['random', 'sequential', 'single'].includes(patch.musicMode)) {
+          settings.musicMode = patch.musicMode
         }
 
         res.writeHead(200, {
@@ -797,6 +810,51 @@ export function apply(ctx) {
   })
 
   ctx.effect(() => disposeMusicDel)
+
+  /**
+   * 把内置套组自带的音乐铺进 storages。
+   *
+   * 只在缺的时候复制：用户删掉的不会被硬塞回来这件事要另说 —— 目前按文件名判断，
+   * 删掉后下次启动会重新出现，内置资源就该这样。
+   */
+  async function seedBuiltinMusic() {
+    let touched = false
+    try {
+      const document = await load()
+      for (const [packId, files] of Object.entries(BUILTIN_MUSIC)) {
+        const pack = document.packs.find((p) => p.id === packId)
+        if (pack === undefined) continue
+        if (!Array.isArray(pack.fallbackMusic)) pack.fallbackMusic = []
+        for (const [order, name] of files.entries()) {
+          const label = name.replace(/\.[^.]+$/, '')
+          if (pack.fallbackMusic.some((m) => m.name === label)) continue
+          let bytes = null
+          try {
+            bytes = await fs.readFile(new URL('./assets/music/' + packId + '/' + name, import.meta.url))
+          } catch {
+            continue
+          }
+          const dir = path.join(root, 'music', packId)
+          await fs.mkdir(dir, { recursive: true })
+          const file = 'builtin-' + String(order + 1) + path.extname(name)
+          await fs.writeFile(path.join(dir, file), bytes)
+          pack.fallbackMusic.push({
+            id: file.replace(/\.[^.]+$/, ''),
+            file: packId + '/' + file,
+            name: label,
+            size: bytes.length,
+            builtin: true,
+          })
+          touched = true
+        }
+      }
+      if (touched) await save(document)
+    } catch {
+      /* 内置音乐是可选的，铺不进去也不该影响插件启动 */
+    }
+  }
+
+  seedBuiltinMusic()
 
   /**
    * Export one pack as a self-contained JSON document.

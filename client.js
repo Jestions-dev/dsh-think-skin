@@ -199,6 +199,9 @@ window.__ModuleLoader__.load({
               musicVolume: Number.isFinite(Number(data.settings.musicVolume))
                 ? Number(data.settings.musicVolume)
                 : 40,
+              musicMode: ['random', 'sequential', 'single'].includes(data.settings.musicMode)
+                ? data.settings.musicMode
+                : 'random',
             }
             Music.applyVolume()
           }
@@ -589,7 +592,7 @@ window.__ModuleLoader__.load({
     // ---------------------------------------------------------------- music
 
     /** 文档根部的音乐设置，loadPack 时顺手抓下来。 */
-    let docSettings = { musicEnabled: true, musicVolume: 40 }
+    let docSettings = { musicEnabled: true, musicVolume: 40, musicMode: 'random' }
 
     function musicUrl(file) {
       return ROUTE + '/music/' + encodeURI(file)
@@ -628,6 +631,8 @@ window.__ModuleLoader__.load({
       let pool = []
       let poolKey = ''
       let bag = []
+      let seqIndex = 0
+      let sessionTrack = null
       let token = 0
       let idleTimer = 0
       const live = new Set()    // 所有没停掉的音源：万一有漏网的，也一定能一起叫停
@@ -711,6 +716,24 @@ window.__ModuleLoader__.load({
 
       function pick() {
         if (pool.length === 0) return null
+        const mode = docSettings.musicMode
+
+        // 单曲循环：这一轮思考就认定一首，之后一直重放它
+        if (mode === 'single') {
+          if (sessionTrack === null) {
+            sessionTrack = pool[Math.floor(Math.random() * pool.length)]
+          }
+          return pool.find((t) => t.id === sessionTrack.id) || sessionTrack
+        }
+
+        // 顺序：按池子里的顺序走，到头回到第一首
+        if (mode === 'sequential') {
+          const track = pool[seqIndex % pool.length]
+          seqIndex = (seqIndex + 1) % pool.length
+          return track
+        }
+
+        // 随机：洗牌袋，一轮不重复
         if (bag.length === 0) shuffle()
         return bag.shift() || null
       }
@@ -878,6 +901,12 @@ window.__ModuleLoader__.load({
           }
           return
         }
+        if (!active) {
+          // 新的一轮思考：洗牌袋、顺序游标、单曲认定全部重来
+          bag = []
+          seqIndex = 0
+          sessionTrack = null
+        }
         active = true
         if (playing === null && !starting && live.size === 0) next()
       }
@@ -910,6 +939,7 @@ window.__ModuleLoader__.load({
         docSettings = {
           musicEnabled: docSettings.musicEnabled,
           musicVolume: Math.max(0, Math.min(100, Math.round(n))),
+          musicMode: docSettings.musicMode,
         }
         applyVolume()
       }
@@ -963,6 +993,9 @@ window.__ModuleLoader__.load({
           musicVolume: Number.isFinite(Number(data.settings.musicVolume))
             ? Number(data.settings.musicVolume)
             : 40,
+          musicMode: ['random', 'sequential', 'single'].includes(data.settings.musicMode)
+            ? data.settings.musicMode
+            : 'random',
         }
         Music.applyVolume()
       }
@@ -1305,6 +1338,7 @@ window.__ModuleLoader__.load({
       const [selected, setSelected] = React.useState('')
       const [musicEnabled, setMusicEnabled] = React.useState(true)
       const [musicVolume, setMusicVolume] = React.useState(40)
+      const [musicMode, setMusicMode] = React.useState('random')
       const [gradient, setGradient] = React.useState(DEFAULT_GRADIENT)
       const [gradientMode, setGradientMode] = React.useState('static')
       const [gradientSpeed, setGradientSpeed] = React.useState(3)
@@ -1322,6 +1356,7 @@ window.__ModuleLoader__.load({
         if (settings === null || settings === null) return
         setMusicEnabled(settings.musicEnabled !== false)
         setMusicVolume(Number.isFinite(Number(settings.musicVolume)) ? Number(settings.musicVolume) : 40)
+        setMusicMode(['random', 'sequential', 'single'].includes(settings.musicMode) ? settings.musicMode : 'random')
       }, [data])
       const [coverFile, setCoverFile] = React.useState(null)
       const [coverPreview, setCoverPreview] = React.useState('')
@@ -2266,6 +2301,28 @@ window.__ModuleLoader__.load({
               title: '思考时放音乐',
               onClick: () => commit({ musicEnabled: !musicEnabled }, ''),
             }),
+          ),
+          h('div', { style: { ...S.row, gap: '8px', marginTop: '2px' } },
+            h('span', { style: { ...S.hint, flex: 'none' } }, '这一轮怎么抽'),
+            h('div', { style: { display: 'flex', gap: '6px' } },
+              [['random', '随机'], ['sequential', '顺序'], ['single', '单曲循环']].map(([value, label]) => h('button', {
+                key: value,
+                type: 'button',
+                className: 'ts-btn',
+                style: {
+                  ...S.btn,
+                  fontSize: '12px',
+                  padding: '4px 10px',
+                  borderColor: musicMode === value ? '#4c8bf5' : undefined,
+                  background: musicMode === value ? 'rgba(76,139,245,.14)' : undefined,
+                },
+                onClick: () => {
+                  setMusicMode(value)
+                  Music.stop()
+                  commit({ musicMode: value }, '')
+                },
+              }, label)),
+            ),
           ),
           h('div', { style: S.hint },
             '只在「思考中」那一行出现时播放，行一消失就淡出。用哪几首在下面每张图 / 通用池里配。'),
