@@ -147,6 +147,17 @@ binary is recorded in [assets/ClaudeCode/FINDINGS.md](assets/ClaudeCode/FINDINGS
 
 ---
 
+## Security / 安全
+
+插件在 DSH 的 web server 上挂了 8 条路由（读写套组、上传图片与音乐、导出导入）。
+每条都先过 DSH 自己的访问检查 `ctx.connection.requestRejection` ——
+它要求请求来自**已认证的活跃 Peer**，跨站的网页过不去。
+老版本 DSH 里没有这个服务时，退回同源的 `Sec-Fetch-Site` / `Origin` 判断。
+
+导入套组那条 `POST /import` 会去下载用户给的 URL：只允许 http/https，
+拒绝回环、内网、链路本地、CGNAT、`*.local`，跟随重定向后复查一次，
+30 秒超时，192 MB 上限。
+
 ## Credits
 
 - **Mechanism reference:** [`huanlinoto/dsh-plugin-prts-neuron`](https://github.com/huanlinoto/dsh-plugin-prts-neuron).

@@ -80,6 +80,38 @@ function originAllowed(get) {
   return true
 }
 
+/**
+ * DSH 自己的访问检查：`ctx.connection.requestRejection` 走 Host/Origin 围栏，
+ * 并要求请求来自**已认证的活跃 Peer**。返回状态码表示拒绝，undefined 表示放行。
+ *
+ * 老版本 DSH 没有这个服务时退回上面的同源检查——不会比现在更宽。
+ */
+function requestRejection(context, request, get) {
+  let connection = null
+  try {
+    connection = context.connection
+  } catch {
+    connection = null
+  }
+  if (connection === undefined || connection === null) {
+    try {
+      if (typeof context.get === 'function') connection = context.get('connection')
+    } catch {
+      connection = null
+    }
+  }
+  if (connection !== undefined && connection !== null
+    && typeof connection.requestRejection === 'function') {
+    try {
+      const status = connection.requestRejection(request)
+      return status === undefined || status === null ? undefined : status
+    } catch {
+      return 403
+    }
+  }
+  return originAllowed(get) ? undefined : 403
+}
+
 /** 本机回环、内网、云元数据地址——导入下载器一律不碰。 */
 function isPrivateHost(hostname) {
   const host = String(hostname).toLowerCase().replace(/^\[|\]$/g, '')
@@ -404,9 +436,10 @@ export function apply(ctx) {
     kind: 'prefix',
     path: ROUTE,
     async resource(request) {
-      if (!originAllowed((name) => request.headers.get(name))) {
+      const blocked = requestRejection(ctx, request, (name) => request.headers.get(name))
+      if (blocked !== undefined) {
         return new Response('forbidden', {
-          status: 403,
+          status: blocked,
           headers: { 'content-type': 'text/plain; charset=utf-8' },
         })
       }
@@ -460,7 +493,8 @@ export function apply(ctx) {
         res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' })
         res.end(message)
       }
-      if (!originAllowed((name) => req.headers[name])) return fail(403, 'forbidden')
+      const blocked = requestRejection(ctx, req, (name) => req.headers[name])
+      if (blocked !== undefined) return fail(blocked, 'forbidden')
       if (req.method !== 'POST') return fail(405, 'method not allowed')
       try {
         const patch = JSON.parse((await readBody(req, MAX_BODY)).toString('utf8'))
@@ -566,7 +600,8 @@ export function apply(ctx) {
         res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' })
         res.end(message)
       }
-      if (!originAllowed((name) => req.headers[name])) return fail(403, 'forbidden')
+      const blocked = requestRejection(ctx, req, (name) => req.headers[name])
+      if (blocked !== undefined) return fail(blocked, 'forbidden')
       if (req.method !== 'POST') return fail(405, 'method not allowed')
       try {
         const body = JSON.parse((await readBody(req, MAX_BODY)).toString('utf8'))
@@ -630,7 +665,8 @@ export function apply(ctx) {
         res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' })
         res.end(message)
       }
-      if (!originAllowed((name) => req.headers[name])) return fail(403, 'forbidden')
+      const blocked = requestRejection(ctx, req, (name) => req.headers[name])
+      if (blocked !== undefined) return fail(blocked, 'forbidden')
       if (req.method !== 'POST') return fail(405, 'method not allowed')
       try {
         const url = new URL(req.url, 'http://local')
@@ -730,7 +766,8 @@ export function apply(ctx) {
         res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' })
         res.end(message)
       }
-      if (!originAllowed((name) => req.headers[name])) return fail(403, 'forbidden')
+      const blocked = requestRejection(ctx, req, (name) => req.headers[name])
+      if (blocked !== undefined) return fail(blocked, 'forbidden')
       if (req.method !== 'POST') return fail(405, 'method not allowed')
       try {
         const url = new URL(req.url, 'http://local')
@@ -805,7 +842,8 @@ export function apply(ctx) {
         res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' })
         res.end(message)
       }
-      if (!originAllowed((name) => req.headers[name])) return fail(403, 'forbidden')
+      const blocked = requestRejection(ctx, req, (name) => req.headers[name])
+      if (blocked !== undefined) return fail(blocked, 'forbidden')
       if (req.method !== 'POST') return fail(405, 'method not allowed')
       try {
         const body = JSON.parse((await readBody(req, MAX_BODY)).toString('utf8'))
@@ -892,7 +930,8 @@ export function apply(ctx) {
         res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' })
         res.end(message)
       }
-      if (!originAllowed((name) => req.headers[name])) return fail(403, 'forbidden')
+      const blocked = requestRejection(ctx, req, (name) => req.headers[name])
+      if (blocked !== undefined) return fail(blocked, 'forbidden')
       if (req.method !== 'POST') return fail(405, 'method not allowed')
       try {
         const body = JSON.parse((await readBody(req, MAX_BODY)).toString('utf8'))
@@ -1022,7 +1061,8 @@ export function apply(ctx) {
         res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' })
         res.end(message)
       }
-      if (!originAllowed((name) => req.headers[name])) return fail(403, 'forbidden')
+      const blocked = requestRejection(ctx, req, (name) => req.headers[name])
+      if (blocked !== undefined) return fail(blocked, 'forbidden')
       if (req.method !== 'POST') return fail(405, 'method not allowed')
       let dir = null
       try {
