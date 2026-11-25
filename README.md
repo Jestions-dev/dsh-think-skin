@@ -110,7 +110,30 @@ $DSH_HOME/storages/think_skin/
 The browser fetches `pack.json` once and each image with `immutable` caching, so the bundle
 stays around 19 KB no matter how many images a pack holds.
 
+### 装完就有（1.1.2）
+
+三个内置套的图**随包一起发**，第一次启动铺进 `storages`，不需要你导入任何东西：
+
+| 套 | 图 | 文案 |
+|---|---|---|
+| 蓝色大肥鱼 | 39 张 GIF | 27 条兜底 + 每张自己的 |
+| ClaudeCode | 1 张占位图 | 184 个 -ing 动词 |
+| 酒狐 | 1 张 GIF | 4 条兜底 + 歌词，另带三段《朋友的酒》 |
+
+```
+素材      assets/compiled-128/蓝色大肥鱼/ · assets/ClaudeCode/ · assets/酒狐/
+文案      assets/texts/<套名>.json
+拼装      seed.js（纯函数，可单测）→ index.js 里 seedBuiltinPacks()
+规则      只补缺的套；你改过、删过的不覆盖
+体积      首次启动会拷 13.4 MB，之后就只是读
+```
+
+> **1.1.1 的坑**：那个版本只有音乐会被铺进来，图不会 —— 装完看到的是空列表。
+> 1.1.2 修了。测这个不能靠开发机（开发机上早就导入过），要清空 `storages/think_skin`
+> 再重启：`node tools/test-seed.mjs` 就是干这个的。
+
 **导入图片：** 设置 → 思考状态 → 选图片 / 选文件夹。文件会被**复制**进上面的目录，原文件随便处置。
+
 **Import from the CLI:**
 
 ```bash

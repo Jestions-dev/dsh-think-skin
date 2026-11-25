@@ -1,3 +1,12 @@
 # 生产工作区（视频素材、渲染帧、构建产物）不进仓库
 film/
 *.zip
+
+# npm 打包产物（本地 file: 安装用，每次 pack 都会重新生成）
+*.tgz
+
+# 参考仓库 / 原始素材（体积大，且都能从别处重新拿到）
+refs/
+assets/蓝色大肥鱼/
+assets/ClaudeCode/_src/
+assets/ClaudeCode/candidates/

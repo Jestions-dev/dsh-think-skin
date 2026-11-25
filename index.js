@@ -19,6 +19,8 @@ import zlib from 'node:zlib'
 import os from 'node:os'
 import path from 'node:path'
 
+import { BUILTIN_PACKS, planBuiltinSeeds } from './seed.js'
+
 const ROUTE = '/think-skin'
 const STORE = 'think_skin'
 
@@ -872,6 +874,62 @@ export function apply(ctx) {
   ctx.effect(() => disposeMusicDel)
 
   /**
+   * 把内置套组（蓝色大肥鱼 / ClaudeCode / 酒狐）铺进 storages。
+   *
+   * 之前只有音乐会被铺进来，图没有 —— 所以别人装完看到的是空列表。
+   * 素材在 assets/ 下，文案在 assets/texts/<套名>.json，
+   * 拼装逻辑在 seed.js（纯函数，能直接用 node 测，不用起 DSH）。
+   * 只补缺的套，用户改过的不覆盖。
+   */
+  async function seedBuiltinPacks() {
+    let touched = false
+    try {
+      const document = await load()
+      const material = {}
+      for (const entry of BUILTIN_PACKS) {
+        for (const dir of entry.dirs) {
+          let fileNames = []
+          try {
+            const names = await fs.readdir(new URL('./assets/' + dir + '/', import.meta.url))
+            fileNames = names.filter((n) => /\.(gif|png|webp|jpe?g|avif)$/i.test(n))
+          } catch {
+            continue
+          }
+          if (fileNames.length === 0) continue
+          let texts = {}
+          try {
+            texts = JSON.parse(
+              await fs.readFile(
+                new URL('./assets/texts/' + entry.id + '.json', import.meta.url),
+                'utf8',
+              ),
+            )
+          } catch {
+            /* 没有文案表就退化成「按文件名当名字」 */
+          }
+          material[entry.id] = { dir, fileNames, texts }
+          break
+        }
+      }
+
+      for (const item of planBuiltinSeeds(document.packs.map((p) => p.id), material)) {
+        const dir = path.join(root, 'images', item.id)
+        await fs.mkdir(dir, { recursive: true })
+        for (const copy of item.copies) {
+          const bytes = await fs.readFile(new URL('./assets/' + copy.from, import.meta.url))
+          await fs.writeFile(path.join(dir, copy.to.slice(item.id.length + 1)), bytes)
+        }
+        document.packs.push(item.pack)
+        if (!document.active) document.active = item.id
+        touched = true
+      }
+      if (touched) await save(document)
+    } catch {
+      /* 内置套组是送分项，铺不进去也不该挡住插件启动 */
+    }
+  }
+
+  /**
    * 把内置套组自带的音乐铺进 storages。
    *
    * 只在缺的时候复制：用户删掉的不会被硬塞回来这件事要另说 —— 目前按文件名判断，
@@ -914,7 +972,10 @@ export function apply(ctx) {
     }
   }
 
-  seedBuiltinMusic()
+  // 先铺套组（音乐只给「已存在的套」铺，所以顺序不能反）
+  seedBuiltinPacks()
+    .then(seedBuiltinMusic)
+    .catch(() => {})
 
   /**
    * Export one pack as a self-contained JSON document.
