@@ -183,7 +183,12 @@ binary is recorded in [assets/ClaudeCode/FINDINGS.md](assets/ClaudeCode/FINDINGS
 
 ## Credits
 
+- **1.1.1 的「装完是空列表」由 [`@Jerat`](https://github.com/Jerat) 定位**（[issue #1](https://github.com/Jestions-dev/dsh-think-skin/issues/1)）：
+  他标出了 `index.js:880` 的 `seedBuiltinMusic()` 是唯一会写 storages 的代码、
+  `BUILTIN` 集合只给已存在的套打标记而不创建它，还指出了**「补音乐要求套已存在，
+  所以顺序反了要重启两次」**这个时序坑 —— 1.1.2 的修法就是照这份诊断来的。
 - **Mechanism reference:** [`huanlinoto/dsh-plugin-prts-neuron`](https://github.com/huanlinoto/dsh-plugin-prts-neuron).
+
   No code was copied — that repository carries no license, so it was read for the DOM facts only
   (`data-chat-running`, `data-shimmer-text`, the icon box being the `svg`'s parent).
 - **Claude Code verb list:** extracted from `@anthropic-ai/claude-code` v2.1.121 by
